@@ -199,13 +199,46 @@ async def fill_input_by_prompt(page, prompt_text: str, value: str, press_enter: 
     if target is None:
         return False
 
-    await target.click()
-    await target.press("Meta+A")
-    await target.press("Backspace")
-    await target.fill(value)
+    await target.click(timeout=3000)
+    await page.keyboard.press("Meta+A")
+    await page.keyboard.press("Backspace")
+    await target.fill(value, timeout=3000)
     await asyncio.sleep(0.2)
     if press_enter:
-        await target.press("Enter")
+        # В этом UI поле может перерисоваться после fill; подтверждаем через активный фокус.
+        await page.keyboard.press("Enter")
+    return True
+
+
+async def fill_select_input_by_field_label(page, field_label: str, value: str, press_enter: bool = True):
+    if not value:
+        return False
+
+    roots = [
+        page.locator(f'.ui-artists-select:has(label p:has-text("{field_label}"))').first,
+        page.locator(f'.ui-labels-select:has(label p:has-text("{field_label}"))').first,
+    ]
+
+    root = None
+    for candidate in roots:
+        if await candidate.count() > 0:
+            root = candidate
+            break
+
+    if root is None:
+        return False
+
+    input_locator = root.locator('.gs-search input[type="text"], .ui-input input[type="text"]').first
+    if await input_locator.count() == 0:
+        return False
+
+    await input_locator.click(timeout=3000)
+    await page.keyboard.press("Meta+A")
+    await page.keyboard.press("Backspace")
+    await input_locator.fill(value, timeout=3000)
+    await asyncio.sleep(0.2)
+    if press_enter:
+        await page.keyboard.press("Enter")
     return True
 
 
@@ -276,8 +309,8 @@ async def set_artist_with_create_fallback(page, label_text: str, artist_name: st
     }
     prompt = prompt_map.get(label_text, "")
 
-    ok = False
-    if prompt:
+    ok = await fill_select_input_by_field_label(page, label_text, artist_name, press_enter=True)
+    if not ok and prompt:
         ok = await fill_input_by_prompt(page, prompt, artist_name, press_enter=True)
     if not ok:
         ok = await fill_input_by_label(page, label_text, artist_name)
@@ -354,7 +387,9 @@ async def upload_to_musicalligator(release_meta: dict, zip_path: str):
                 await fill_input_by_label(page, "Версия релиза", release_meta.get("version", ""))
 
             # Лейбл = первый артист; если не найден, создаем лейбл.
-            label_ok = await fill_input_by_prompt(page, "Введите лейбл", main_artist, press_enter=True)
+            label_ok = await fill_select_input_by_field_label(page, "Лейбл", main_artist, press_enter=True)
+            if not label_ok:
+                label_ok = await fill_input_by_prompt(page, "Введите лейбл", main_artist, press_enter=True)
             if not label_ok:
                 label_ok = await fill_input_by_label(page, "Лейбл", main_artist)
             if not label_ok:
