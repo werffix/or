@@ -195,6 +195,7 @@ async def fill_input_by_label(page, label_text: str, value: str):
 async def fill_input_by_prompt(page, prompt_text: str, value: str, press_enter: bool = False):
     if not value:
         return False
+    # Ищем поле по плейсхолдеру (из твоего HTML) или по структуре ui-input
     selectors = [
         f'input[placeholder*="{prompt_text}" i]',
         f'div.ui-input:has(span:has-text("{prompt_text}")) input',
@@ -281,7 +282,6 @@ async def set_artist_with_create_fallback(page, label_text: str, artist_name: st
     if await create_btn.count() > 0 and await create_btn.is_visible():
         await create_btn.click()
         await asyncio.sleep(1)
-        # Отвечаем "Нет" на вопросы про Spotify/Apple (судя по типичному флоу Аллигатора)
         for _ in range(2):
             no_btn = page.locator('button:has-text("Нет")').first
             if await no_btn.count() > 0: await no_btn.click()
@@ -310,7 +310,7 @@ async def upload_to_musicalligator(release_meta: dict, zip_path: str):
             if artists:
                 await set_artist_with_create_fallback(page, "Исполнитель", artists[0])
 
-            # Использование плейсхолдеров из твоего HTML для гарантированного заполнения
+            # ЗАПОЛНЕНИЕ ПО ТВОЕМУ HTML (placeholder="Название" и "Версия")
             await fill_input_by_prompt(page, "Название", release_meta.get("title", ""))
             await fill_input_by_prompt(page, "Версия", release_meta.get("version", ""))
 
@@ -324,6 +324,7 @@ async def upload_to_musicalligator(release_meta: dict, zip_path: str):
                 await enable_toggle_by_text(page, "У меня есть свой EAN/UPC")
                 await fill_input_by_prompt(page, "EAN/UPC", release_meta["upc"])
 
+            # Ждем автосохранения или просто уходим в список
             await page.goto("https://app.musicalligator.ru/releases", timeout=90000)
             await browser.close()
             return {"status": "success", "message": f"Релиз отправлен в {account['note']}"}
@@ -336,59 +337,95 @@ async def scrape_ordistribution(target_artist: str, target_release: str):
     logger.info(f"Запуск глубокого поиска для: {target_artist} - {target_release}")
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(accept_downloads=True, viewport={'width': 1920, 'height': 1080})
+        context = await browser.new_context(
+            accept_downloads=True, 
+            viewport={'width': 1920, 'height': 1080},
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        )
         page = await context.new_page()
+
         try:
             await page.goto("https://ordistribution.com/login", timeout=60000)
             await page.fill('input[type="email"]', LOGIN) 
             await page.fill('input[type="password"]', PASSWORD)
             await page.click('button[type="submit"]')
             await page.wait_for_load_state("networkidle")
+            
             await page.goto("https://ordistribution.com/admin/dashboard", timeout=60000)
             await asyncio.sleep(8) 
 
             async def set_search_value(search_input, value: str):
                 await search_input.click()
-                await search_input.evaluate("(el, val) => { el.value = val; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); }", value)
+                await search_input.press("Meta+A")
+                await search_input.press("Backspace")
+                await search_input.fill("")
+                await search_input.evaluate(
+                    """(el, newValue) => {
+                        const prototype = Object.getPrototypeOf(el);
+                        const valueSetter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
+                        if (valueSetter) { valueSetter.call(el, newValue); } else { el.value = newValue; }
+                        el.dispatchEvent(new Event('input', { bubbles: true }));
+                        el.dispatchEvent(new Event('change', { bubbles: true }));
+                    }""",
+                    value,
+                )
 
             async def find_row(search_query: str, verify_string: str):
-                search_input = page.locator('input[type="search"], input[placeholder*="search" i]').first
+                search_input = page.locator('input[type="search"], input[placeholder*="поиск" i], input[placeholder*="search" i]').first
                 if await search_input.count() == 0: return None
                 await set_search_value(search_input, search_query)
+                await asyncio.sleep(2)
                 await search_input.press("Enter")
-                await asyncio.sleep(4)
-                
-                cards = await page.locator("article, section, li, div").all()
+                await asyncio.sleep(3)
+
+                cards = await page.locator("article:has-text('" + search_query + "'), section:has-text('" + search_query + "'), div:has-text('" + search_query + "')").all()
                 for card in cards:
                     if not await card.is_visible(): continue
-                    txt = await card.inner_text()
-                    if search_query.lower() in txt.lower() and verify_string.lower() in txt.lower() and 20 < len(txt) < 2000:
+                    card_text = await card.inner_text()
+                    clean_card = " ".join(card_text.split()).lower()
+                    if verify_string.lower() in clean_card and 20 < len(clean_card) < 2000 and "панель администратора" not in clean_card:
                         return card
                 return None
+
+            async def open_release_details(result_row):
+                btn = result_row.locator('button:has-text("Подробнее"), a:has-text("Подробнее")').first
+                if await btn.count() > 0:
+                    await btn.click()
+                    await asyncio.sleep(2)
+                    return True
+                return False
+
+            async def download_zip_from_details():
+                zip_btn = page.locator('button:has-text("Скачать ZIP"), a:has-text("Скачать ZIP"), a[href*="zip"]').first
+                async with page.expect_download(timeout=60000) as download_info:
+                    await zip_btn.click()
+                return await download_info.value
 
             result_row = await find_row(target_release, target_artist) or await find_row(target_artist, target_release)
             if not result_row:
                 await browser.close()
-                return {"status": "error", "message": "Релиз не найден в OR"}
+                return {"status": "error", "message": f"Не найден: {target_artist} - {target_release}"}
 
             row_info = await result_row.inner_text()
-            await result_row.locator('button:has-text("Подробнее"), a:has-text("Подробнее")').first.click()
-            await asyncio.sleep(2)
+            if not await open_release_details(result_row):
+                raise RuntimeError("Не удалось открыть карточку")
 
-            async with page.expect_download(timeout=60000) as download_info:
-                await page.locator('button:has-text("ZIP"), a:has-text("ZIP"), a[href*="zip"]').first.click()
-            download = await download_info.value
+            download = await download_zip_from_details()
             file_path = os.path.join(downloads_path, download.suggested_filename)
             await download.save_as(file_path)
+            
             await browser.close()
-            return {"status": "success", "info": row_info, "file_path": file_path}
+            return {"status": "success", "info": row_info.replace("\n", " ").strip(), "file_path": file_path}
+
         except Exception as e:
             await browser.close()
+            logger.error(f"Ошибка OR: {e}")
             return {"status": "error", "message": f"Ошибка OR: {str(e)[:50]}"}
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    if is_authorized(message): await message.answer("Пришли: `Артист - Название`")
+    if not is_authorized(message): return
+    await message.answer("Пришли: `Артист - Название релиза`")
 
 @dp.message(Command("accounts"))
 async def cmd_accounts(message: types.Message):
@@ -404,25 +441,34 @@ async def cmd_accounts(message: types.Message):
         if len(p) == 3:
             data['accounts'].append({"note": p[0], "email": p[1], "password": p[2]})
             data['active_index'] = 0 if data['active_index'] is None else data['active_index']
-            write_accounts(data); await message.answer("Добавлен")
+            write_accounts(data); await message.answer("Добавлен.")
 
 @dp.message(F.text)
 async def handle_request(message: types.Message):
     if not is_authorized(message) or " - " not in message.text: return
     artist, release = message.text.split(" - ", 1)
-    status_msg = await message.answer("🔍 Поиск в OR Distribution...")
-    
+    status_msg = await message.answer(f"🔍 Ищу...")
+
     result = await scrape_ordistribution(artist.strip(), release.strip())
     if result["status"] == "error":
-        await status_msg.edit_text(f"❌ {result['message']}"); return
+        await status_msg.edit_text(f"❌ {result['message']}")
+        return
 
-    # Парсим инфу из OR. Название берется ОТТУДА, а не из твоего сообщения.
-    release_meta = parse_release_info(result["info"], artist.strip(), release.strip())
-    
-    await status_msg.edit_text("🚀 Загрузка в MusicAlligator...")
+    # Извлекаем инфо из OR
+    release_meta = parse_release_info(
+        result["info"],
+        fallback_artist=artist.strip(),
+        fallback_release=release.strip()
+    )
+
+    # ВНИМАНИЕ: Строка release_meta["title"] = release.strip() УДАЛЕНА.
+    # Теперь название берется только из parse_release_info (из данных OR).
+
     upload_result = await upload_to_musicalligator(release_meta, result["file_path"])
-    
     await status_msg.edit_text(f"{'✅' if upload_result['status'] == 'success' else '⚠️'} {upload_result['message']}\n\nИнфо: `{release_meta['title']}`")
 
-async def main(): await dp.start_polling(bot)
-if __name__ == "__main__": asyncio.run(main())
+async def main():
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
