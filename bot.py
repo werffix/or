@@ -182,14 +182,11 @@ async def login_musicalligator(page, email: str, password: str):
 async def fill_input_by_label(page, label_text: str, value: str):
     if not value:
         return False
-
-    input_locator = page.locator(
-        f'label:has-text("{label_text}") >> xpath=following::input[1]'
-    ).first
+    input_locator = page.locator(f'label:has-text("{label_text}") >> xpath=following::input[1]').first
     if await input_locator.count() == 0:
         return False
     await input_locator.click()
-    await page.keyboard.press("Control+A")
+    await page.keyboard.press("Meta+A")
     await page.keyboard.press("Backspace")
     await input_locator.fill(value)
     return True
@@ -198,25 +195,22 @@ async def fill_input_by_label(page, label_text: str, value: str):
 async def fill_input_by_prompt(page, prompt_text: str, value: str, press_enter: bool = False):
     if not value:
         return False
-
     selectors = [
+        f'input[placeholder*="{prompt_text}" i]',
         f'div.ui-input:has(span:has-text("{prompt_text}")) input',
         f'div.gs-search:has(span:has-text("{prompt_text}")) input',
-        f'input[placeholder*="{prompt_text}" i]',
     ]
-
     target = None
     for selector in selectors:
         locator = page.locator(selector).first
         if await locator.count() > 0:
             target = locator
             break
-
     if target is None:
         return False
 
     await target.click(timeout=3000)
-    await page.keyboard.press("Control+A")
+    await page.keyboard.press("Meta+A")
     await page.keyboard.press("Backspace")
     await target.fill(value, timeout=3000)
     await asyncio.sleep(0.2)
@@ -228,27 +222,22 @@ async def fill_input_by_prompt(page, prompt_text: str, value: str, press_enter: 
 async def fill_select_input_by_field_label(page, field_label: str, value: str, press_enter: bool = True):
     if not value:
         return False
-
     roots = [
         page.locator(f'.ui-artists-select:has(label p:has-text("{field_label}"))').first,
         page.locator(f'.ui-labels-select:has(label p:has-text("{field_label}"))').first,
     ]
-
     root = None
     for candidate in roots:
         if await candidate.count() > 0:
             root = candidate
             break
-
     if root is None:
         return False
-
     input_locator = root.locator('.gs-search input[type="text"], .ui-input input[type="text"]').first
     if await input_locator.count() == 0:
         return False
-
     await input_locator.click(timeout=3000)
-    await page.keyboard.press("Control+A")
+    await page.keyboard.press("Meta+A")
     await page.keyboard.press("Backspace")
     await input_locator.fill(value, timeout=3000)
     await asyncio.sleep(0.2)
@@ -258,100 +247,50 @@ async def fill_select_input_by_field_label(page, field_label: str, value: str, p
 
 
 async def enable_toggle_by_text(page, toggle_text: str):
-    root = page.locator(
-        f'.row-toggle:has(p:has-text("{toggle_text}")), '
-        f'div:has(> p:has-text("{toggle_text}"))'
-    ).first
-
+    root = page.locator(f'.row-toggle:has(p:has-text("{toggle_text}")), div:has(> p:has-text("{toggle_text}"))').first
     if await root.count() == 0:
         return False
-
     checkbox = root.locator('input[type="checkbox"]').first
     if await checkbox.count() == 0:
         return False
-
     try:
-        if await checkbox.is_checked():
-            return True
-    except Exception:
-        pass
-
+        if await checkbox.is_checked(): return True
+    except: pass
     slider = root.locator('.slider, .ui-switch, label.ui-switch, span.round').first
     if await slider.count() > 0:
         try:
             await slider.click(timeout=3000)
             await asyncio.sleep(0.2)
-            if await checkbox.is_checked():
-                return True
-        except Exception:
-            pass
-
-    text_node = root.locator(f'p:has-text("{toggle_text}")').first
-    if await text_node.count() > 0:
-        try:
-            await text_node.click(timeout=3000)
-            await asyncio.sleep(0.2)
-            if await checkbox.is_checked():
-                return True
-        except Exception:
-            pass
-
-    await checkbox.evaluate(
-        """(el) => {
-            if (!el.checked) {
-                el.checked = true;
-                el.dispatchEvent(new Event('input', { bubbles: true }));
-                el.dispatchEvent(new Event('change', { bubbles: true }));
-            }
-        }"""
-    )
-    await asyncio.sleep(0.2)
+            if await checkbox.is_checked(): return True
+        except: pass
+    await checkbox.evaluate("(el) => { if (!el.checked) { el.checked = true; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); } }")
     return await checkbox.is_checked()
 
 
 async def set_artist_with_create_fallback(page, label_text: str, artist_name: str):
-    if not artist_name:
-        return
-
-    prompt_map = {
-        "Исполнитель": "Введите основного исполнителя",
-        "Дополнительный исполнитель": "Введите доп. исполнителя",
-        "При участии (feat.)": "Введите feat. исполнителя",
-    }
+    if not artist_name: return
+    prompt_map = {"Исполнитель": "Введите основного исполнителя", "Дополнительный исполнитель": "Введите доп. исполнителя"}
     prompt = prompt_map.get(label_text, "")
-
     ok = await fill_select_input_by_field_label(page, label_text, artist_name, press_enter=True)
     if not ok and prompt:
         ok = await fill_input_by_prompt(page, prompt, artist_name, press_enter=True)
     if not ok:
-        ok = await fill_input_by_label(page, label_text, artist_name)
-        if ok:
-            artist_input = page.locator('input:focus').first
-            if await artist_input.count() > 0:
-                await artist_input.press("Enter")
-    if not ok:
-        logger.warning("Не удалось заполнить поле артиста: %s", label_text)
-        return
-
+        await fill_input_by_label(page, label_text, artist_name)
     await asyncio.sleep(1)
-    create_btn = page.locator('button:has-text("Создать исполнителя"), div:has-text("Создать исполнителя")').first
+    create_btn = page.locator('button:has-text("Создать исполнителя")').first
     if await create_btn.count() > 0 and await create_btn.is_visible():
         await create_btn.click()
         await asyncio.sleep(1)
-        no_buttons = page.locator('button:has-text("Нет"), div:has-text("Нет")')
-        if await no_buttons.count() >= 2:
-            await no_buttons.nth(0).click()
-            await no_buttons.nth(1).click()
-        create_final = page.locator('button:has-text("Создать исполнителя")').last
-        if await create_final.count() > 0 and await create_final.is_visible():
-            await create_final.click()
+        # Отвечаем "Нет" на вопросы про Spotify/Apple (судя по типичному флоу Аллигатора)
+        for _ in range(2):
+            no_btn = page.locator('button:has-text("Нет")').first
+            if await no_btn.count() > 0: await no_btn.click()
+        await page.locator('button:has-text("Создать исполнителя")').last.click()
 
 
 async def upload_to_musicalligator(release_meta: dict, zip_path: str):
     account = active_account()
-    if not account:
-        return {"status": "error", "message": "Нет выбранного аккаунта MusicAlligator. Используй /accounts"}
-
+    if not account: return {"status": "error", "message": "Нет аккаунта"}
     assets = extract_zip_assets(zip_path)
     cover_path = assets["cover_path"]
 
@@ -359,217 +298,131 @@ async def upload_to_musicalligator(release_meta: dict, zip_path: str):
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(viewport={"width": 1920, "height": 1080})
         page = await context.new_page()
-        page.set_default_timeout(90000)
-        current_step = "init"
-
         try:
-            current_step = "login"
             await login_musicalligator(page, account["email"], account["password"])
-
-            current_step = "click_new_release"
             await page.locator('button:has-text("Новый релиз")').first.click()
             await page.wait_for_selector('input[type="file"][accept*="image"]', timeout=90000)
-            await asyncio.sleep(2)
 
             if cover_path:
-                current_step = "upload_cover"
-                file_input = page.locator('input[type="file"][accept*="image"]').first
-                await file_input.set_input_files(cover_path)
-                await asyncio.sleep(1)
+                await page.locator('input[type="file"][accept*="image"]').first.set_input_files(cover_path)
 
             artists = release_meta.get("artists", [])
-            main_artist = artists[0] if artists else ""
-            extra_artists = artists[1:] if len(artists) > 1 else []
+            if artists:
+                await set_artist_with_create_fallback(page, "Исполнитель", artists[0])
 
-            current_step = "fill_artist"
-            await set_artist_with_create_fallback(page, "Исполнитель", main_artist)
-            if extra_artists:
-                await set_artist_with_create_fallback(page, "Дополнительный исполнитель", extra_artists[0])
+            # Использование плейсхолдеров из твоего HTML для гарантированного заполнения
+            await fill_input_by_prompt(page, "Название", release_meta.get("title", ""))
+            await fill_input_by_prompt(page, "Версия", release_meta.get("version", ""))
 
-            current_step = "fill_release_fields"
-            # Заполняем Название. Судя по HTML, плейсхолдер может быть просто "Название"
-            title_ok = await fill_input_by_prompt(page, "Название", release_meta.get("title", ""))
-            if not title_ok:
-                await fill_input_by_label(page, "Название релиза", release_meta.get("title", ""))
-
-            # Заполняем Версию. Плейсхолдер "Версия"
-            version_ok = await fill_input_by_prompt(page, "Версия", release_meta.get("version", ""))
-            if not version_ok:
-                await fill_input_by_label(page, "Версия релиза", release_meta.get("version", ""))
-
-            # Лейбл
-            label_ok = await fill_select_input_by_field_label(page, "Лейбл", main_artist, press_enter=True)
-            if not label_ok:
-                label_ok = await fill_input_by_prompt(page, "Введите лейбл", main_artist, press_enter=True)
+            await fill_select_input_by_field_label(page, "Лейбл", artists[0] if artists else "CDCULT", press_enter=True)
             
-            await asyncio.sleep(1)
-            create_label_btn = page.locator('button:has-text("Проверить и создать лейбл"), div:has-text("Проверить и создать лейбл")').first
-            if await create_label_btn.count() > 0 and await create_label_btn.is_visible():
-                await create_label_btn.click()
-
-            # Дата
-            date_value = release_meta.get("release_date", "")
-            if date_value:
-                normalized_date = date_value.replace("-", ".")
+            if release_meta.get("release_date"):
                 await enable_toggle_by_text(page, "Оригинальная дата релиза")
-                
-                date_ok = await fill_input_by_label(page, "Оригинальная дата релиза", normalized_date)
-                if not date_ok:
-                    date_input = page.locator('.-full-calendar input[type="text"]:not([disabled])').last
-                    if await date_input.count() > 0:
-                        await date_input.click()
-                        await page.keyboard.press("Control+A")
-                        await page.keyboard.type(normalized_date, delay=30)
-                        await page.keyboard.press("Enter")
+                await fill_input_by_label(page, "Оригинальная дата релиза", release_meta["release_date"].replace("-", "."))
 
-            # UPC
-            upc = release_meta.get("upc", "")
-            if upc:
+            if release_meta.get("upc"):
                 await enable_toggle_by_text(page, "У меня есть свой EAN/UPC")
-                await fill_input_by_prompt(page, "EAN/UPC", upc)
+                await fill_input_by_prompt(page, "EAN/UPC", release_meta["upc"])
 
-            current_step = "return_releases"
-            await page.goto("https://app.musicalligator.ru/releases", timeout=90000, wait_until="domcontentloaded")
-            await page.wait_for_selector('button:has-text("Новый релиз")', timeout=90000)
-
+            await page.goto("https://app.musicalligator.ru/releases", timeout=90000)
             await browser.close()
-            return {"status": "success", "message": f"Релиз отправлен в кабинет {account['note']} ({account['email']})"}
+            return {"status": "success", "message": f"Релиз отправлен в {account['note']}"}
         except Exception as e:
-            debug_path = os.path.join(BASE_DIR, "error_musicalligator.png")
-            try: await page.screenshot(path=debug_path, full_page=True)
-            except: pass
             await browser.close()
-            logger.error("Ошибка MusicAlligator на шаге '%s': %s", current_step, e, exc_info=True)
-            return {"status": "error", "message": f"Ошибка MusicAlligator (шаг: {current_step}): {str(e)[:180]}"}
+            logger.error(f"Ошибка Аллигатора: {e}")
+            return {"status": "error", "message": f"Ошибка: {str(e)[:100]}"}
 
 async def scrape_ordistribution(target_artist: str, target_release: str):
+    logger.info(f"Запуск глубокого поиска для: {target_artist} - {target_release}")
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(
-            accept_downloads=True, 
-            viewport={'width': 1920, 'height': 1080},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-        )
+        context = await browser.new_context(accept_downloads=True, viewport={'width': 1920, 'height': 1080})
         page = await context.new_page()
-
         try:
             await page.goto("https://ordistribution.com/login", timeout=60000)
             await page.fill('input[type="email"]', LOGIN) 
             await page.fill('input[type="password"]', PASSWORD)
             await page.click('button[type="submit"]')
             await page.wait_for_load_state("networkidle")
-            
             await page.goto("https://ordistribution.com/admin/dashboard", timeout=60000)
             await asyncio.sleep(8) 
+
+            async def set_search_value(search_input, value: str):
+                await search_input.click()
+                await search_input.evaluate("(el, val) => { el.value = val; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); }", value)
 
             async def find_row(search_query: str, verify_string: str):
                 search_input = page.locator('input[type="search"], input[placeholder*="search" i]').first
                 if await search_input.count() == 0: return None
-                
-                await search_input.click()
-                await page.keyboard.press("Control+A")
-                await page.keyboard.press("Backspace")
-                await search_input.fill(search_query)
+                await set_search_value(search_input, search_query)
                 await search_input.press("Enter")
                 await asyncio.sleep(4)
-
+                
                 cards = await page.locator("article, section, li, div").all()
                 for card in cards:
                     if not await card.is_visible(): continue
-                    card_text = await card.inner_text()
-                    if (search_query.lower() in card_text.lower() and 
-                        verify_string.lower() in card_text.lower() and 
-                        20 < len(card_text) < 2000):
+                    txt = await card.inner_text()
+                    if search_query.lower() in txt.lower() and verify_string.lower() in txt.lower() and 20 < len(txt) < 2000:
                         return card
                 return None
 
             result_row = await find_row(target_release, target_artist) or await find_row(target_artist, target_release)
             if not result_row:
                 await browser.close()
-                return {"status": "error", "message": f"Не найден: {target_artist} - {target_release}"}
+                return {"status": "error", "message": "Релиз не найден в OR"}
 
             row_info = await result_row.inner_text()
-            btn = result_row.locator('button:has-text("Подробнее"), a:has-text("Подробнее")').first
-            await btn.click()
+            await result_row.locator('button:has-text("Подробнее"), a:has-text("Подробнее")').first.click()
             await asyncio.sleep(2)
 
-            zip_btn = page.locator('button:has-text("ZIP"), a:has-text("ZIP"), a[href*="zip"]').first
             async with page.expect_download(timeout=60000) as download_info:
-                await zip_btn.click()
+                await page.locator('button:has-text("ZIP"), a:has-text("ZIP"), a[href*="zip"]').first.click()
             download = await download_info.value
             file_path = os.path.join(downloads_path, download.suggested_filename)
             await download.save_as(file_path)
-            
             await browser.close()
-            return {"status": "success", "info": row_info.replace("\n", " ").strip(), "file_path": file_path}
-
+            return {"status": "success", "info": row_info, "file_path": file_path}
         except Exception as e:
             await browser.close()
             return {"status": "error", "message": f"Ошибка OR: {str(e)[:50]}"}
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    if not is_authorized(message): return
-    await message.answer("Пришли: `Артист - Название релиза`")
+    if is_authorized(message): await message.answer("Пришли: `Артист - Название`")
 
 @dp.message(Command("accounts"))
 async def cmd_accounts(message: types.Message):
     if not is_authorized(message): return
     args = (message.text or "").replace("/accounts", "", 1).strip()
     data = read_accounts()
-    accounts = data.get("accounts", [])
-    active_idx = data.get("active_index")
-
     if not args:
-        lines = ["Аккаунты MusicAlligator:"]
-        for i, acc in enumerate(accounts, start=1):
-            marker = "✅" if active_idx == (i - 1) else "•"
-            lines.append(f"{marker} {i}. {acc['note']} | {acc['email']}")
-        await message.answer("\n".join(lines) + "\n\n/accounts add Примечание | email | password\n/accounts use 1")
+        lines = [f"{'✅' if data['active_index'] == i else '•'} {i+1}. {a['note']}" for i, a in enumerate(data['accounts'])]
+        await message.answer("\n".join(lines) or "Нет аккаунтов")
         return
-
-    if args.lower().startswith("add "):
-        parts = [p.strip() for p in args[4:].split("|")]
-        if len(parts) == 3:
-            accounts.append({"note": parts[0], "email": parts[1], "password": parts[2]})
-            if data["active_index"] is None: data["active_index"] = 0
-            write_accounts(data)
-            await message.answer("Добавлен.")
-        return
-
-    if args.lower().startswith("use "):
-        idx = int(args[4:].strip()) - 1
-        if 0 <= idx < len(accounts):
-            data["active_index"] = idx
-            write_accounts(data)
-            await message.answer(f"Активен: {accounts[idx]['note']}")
-        return
+    if args.startswith("add "):
+        p = [x.strip() for x in args[4:].split("|")]
+        if len(p) == 3:
+            data['accounts'].append({"note": p[0], "email": p[1], "password": p[2]})
+            data['active_index'] = 0 if data['active_index'] is None else data['active_index']
+            write_accounts(data); await message.answer("Добавлен")
 
 @dp.message(F.text)
 async def handle_request(message: types.Message):
     if not is_authorized(message) or " - " not in message.text: return
     artist, release = message.text.split(" - ", 1)
-    status_msg = await message.answer(f"🔍 Ищу...")
-
+    status_msg = await message.answer("🔍 Поиск в OR Distribution...")
+    
     result = await scrape_ordistribution(artist.strip(), release.strip())
     if result["status"] == "error":
-        await status_msg.edit_text(f"❌ {result['message']}")
-        return
+        await status_msg.edit_text(f"❌ {result['message']}"); return
 
-    # Извлекаем метаданные из данных на сайте OR
-    release_meta = parse_release_info(
-        result["info"],
-        fallback_artist=artist.strip(),
-        fallback_release=release.strip()
-    )
-
-    # УДАЛЕНО ПЕРЕЗАПИСЫВАНИЕ: Теперь название берется строго из карточки OR, а не из запроса пользователя.
-
+    # Парсим инфу из OR. Название берется ОТТУДА, а не из твоего сообщения.
+    release_meta = parse_release_info(result["info"], artist.strip(), release.strip())
+    
+    await status_msg.edit_text("🚀 Загрузка в MusicAlligator...")
     upload_result = await upload_to_musicalligator(release_meta, result["file_path"])
-    await status_msg.edit_text(f"{'✅' if upload_result['status'] == 'success' else '⚠️'} {upload_result['message']}\n\nИнфо: `{result['info']}`")
+    
+    await status_msg.edit_text(f"{'✅' if upload_result['status'] == 'success' else '⚠️'} {upload_result['message']}\n\nИнфо: `{release_meta['title']}`")
 
-async def main():
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    asyncio.run(main())
+async def main(): await dp.start_polling(bot)
+if __name__ == "__main__": asyncio.run(main())
