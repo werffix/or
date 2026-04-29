@@ -264,8 +264,6 @@ async def upload_to_musicalligator(release_meta: dict, zip_path: str):
 
     assets = extract_zip_assets(zip_path)
     cover_path = assets["cover_path"]
-    if not cover_path:
-        return {"status": "error", "message": "В ZIP не найдена обложка (jpg/png/webp)"}
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
@@ -283,10 +281,13 @@ async def upload_to_musicalligator(release_meta: dict, zip_path: str):
             await page.wait_for_selector('input[type="file"][accept*="image"]', timeout=90000)
             await asyncio.sleep(2)
 
-            current_step = "upload_cover"
-            file_input = page.locator('input[type="file"][accept*="image"]').first
-            await file_input.set_input_files(cover_path)
-            await asyncio.sleep(1)
+            if cover_path:
+                current_step = "upload_cover"
+                file_input = page.locator('input[type="file"][accept*="image"]').first
+                await file_input.set_input_files(cover_path)
+                await asyncio.sleep(1)
+            else:
+                logger.warning("В ZIP не найдена обложка — продолжаем без загрузки обложки")
 
             artists = release_meta.get("artists", [])
             main_artist = artists[0] if artists else ""
@@ -325,7 +326,8 @@ async def upload_to_musicalligator(release_meta: dict, zip_path: str):
             await page.wait_for_selector('button:has-text("Новый релиз")', timeout=90000)
 
             await browser.close()
-            return {"status": "success", "message": f"Релиз отправлен в кабинет {account['note']} ({account['email']})"}
+            no_cover_note = " (без обложки)" if not cover_path else ""
+            return {"status": "success", "message": f"Релиз отправлен в кабинет {account['note']} ({account['email']}){no_cover_note}"}
         except Exception as e:
             debug_path = os.path.join(BASE_DIR, "error_musicalligator.png")
             try:
