@@ -41,7 +41,7 @@ async def scrape_ordistribution(target_artist: str, target_release: str):
         context = await browser.new_context(
             accept_downloads=True, 
             viewport={'width': 1920, 'height': 1080},
-            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
         )
         page = await context.new_page()
 
@@ -56,72 +56,71 @@ async def scrape_ordistribution(target_artist: str, target_release: str):
             # 2. Переход в админку
             logger.info("Переход в админ-панель...")
             await page.goto("https://ordistribution.com/admin/dashboard", timeout=60000)
-            
-            # Ждем прогрузки интерфейса
-            await asyncio.sleep(7)
+            await asyncio.sleep(8) # Даем время скриптам DataTables инициализироваться
 
             async def find_row(search_query: str, verify_string: str):
-                logger.info(f"--- Попытка поиска по запросу: {search_query} ---")
+                logger.info(f"--- Поиск: {search_query} ---")
                 
-                # Поиск поля ввода
-                search_input = page.locator('input[placeholder*="Поиск"], input[type="search"], .dataTables_filter input').first
+                # Селектор инпута из твоего HTML (DataTables обычно создает input в блоке filter)
+                search_selector = 'input[type="search"], .dataTables_filter input'
+                search_input = page.locator(search_selector).first
+                
                 if await search_input.count() == 0:
-                    logger.error("Поле поиска не найдено!")
+                    logger.error("Инпут поиска не найден!")
                     return None
 
-                await search_input.click()
-                # Полная очистка поля через горячие клавиши
-                await page.keyboard.press("Control+A")
-                await page.keyboard.press("Backspace")
-                
-                # Печатаем медленно, чтобы сработали скрипты сайта
-                await search_input.type(search_query, delay=100)
-                await asyncio.sleep(1)
+                # Фокусируемся и вводим текст через JS (самый надежный метод)
+                await search_input.evaluate("el => el.value = ''") # Очистка
+                await search_input.focus()
+                await page.keyboard.type(search_query, delay=100)
                 await page.keyboard.press("Enter")
                 
-                # Ждем фильтрации таблицы
-                await asyncio.sleep(5)
+                await asyncio.sleep(5) # Ждем, пока таблица перерисуется
 
-                # Проверяем все строки в теле таблицы
-                rows = page.locator("table tbody tr, tr")
-                count = await rows.count()
-                logger.info(f"Найдено строк после фильтрации: {count}")
+                # Ищем все строки в теле таблицы
+                rows = page.locator("table#DataTables_Table_0 tbody tr, table tbody tr, tr").all()
+                
+                valid_rows = []
+                for row in rows:
+                    txt = await row.inner_text()
+                    if "No matching records" in txt or "Записи отсутствуют" in txt:
+                        continue
+                    valid_rows.append(row)
+
+                logger.info(f"Строк для проверки: {len(valid_rows)}")
                 
                 clean_verify = verify_string.strip().lower()
 
-                for i in range(count):
-                    row_text = await rows.nth(i).inner_text()
-                    # Чистим текст строки от лишних пробелов и переносов
+                for row in valid_rows:
+                    row_text = await row.inner_text()
                     clean_row = " ".join(row_text.split()).lower()
                     
-                    logger.info(f"Проверка строки #{i}: {clean_row}")
+                    logger.info(f"Проверка: {clean_row}")
                     
                     if clean_verify in clean_row:
-                        logger.info(f"Совпадение подтверждено в строке #{i}")
-                        return rows.nth(i)
+                        logger.info("Найдено совпадение!")
+                        return row
                 
                 return None
 
-            # ШАГ 1: Поиск по названию релиза + проверка артиста
+            # Пробуем найти
             result_row = await find_row(target_release, target_artist)
-
-            # ШАГ 2: Если не нашли, поиск по артисту + проверка релиза
             if not result_row:
-                logger.info("Поиск по релизу не дал результатов. Пробуем по артисту...")
+                logger.info("По релизу пусто, пробуем по артисту...")
                 result_row = await find_row(target_artist, target_release)
 
             if not result_row:
                 await browser.close()
-                return {"status": "error", "message": f"Не удалось найти '{target_release}' от '{target_artist}'"}
+                return {"status": "error", "message": f"Не найден: {target_artist} - {target_release}"}
 
-            # 3. Скачивание
-            row_info = await result_row.inner_text()
-            # Ищем ссылку для скачивания именно в этой строке
-            download_btn = result_row.locator('a[href*="download"], a:has-text("ZIP"), a:has-text("Скачать"), a:has-text("Download")').first
+            # 3. Скачивание ZIP
+            # Ищем ссылку именно внутри найденной строки
+            download_link = result_row.locator('a[href*="download"], a:has-text("ZIP"), a:has-text("ZIP")').first
             
-            logger.info("Начинаем скачивание ZIP...")
+            row_info = await result_row.inner_text()
+            
             async with page.expect_download(timeout=60000) as download_info:
-                await download_btn.click()
+                await download_link.click()
             
             download = await download_info.value
             file_path = os.path.join(downloads_path, download.suggested_filename)
@@ -137,21 +136,19 @@ async def scrape_ordistribution(target_artist: str, target_release: str):
         except Exception as e:
             error_img = os.path.join(BASE_DIR, "error_debug.png")
             await page.screenshot(path=error_img)
-            logger.error(f"Ошибка парсера: {e}", exc_info=True)
+            logger.error(f"Ошибка: {e}", exc_info=True)
             await browser.close()
-            return {"status": "error", "message": f"Ошибка: {str(e)[:60]}"}
+            return {"status": "error", "message": f"Ошибка: {str(e)[:50]}"}
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await message.answer("Пришли: `Артист - Название релиза`.\nЯ проверю наличие обоих параметров перед скачиванием.")
+    await message.answer("Пришли: `Артист - Название релиза`")
 
 @dp.message(F.text)
 async def handle_request(message: types.Message):
-    if " - " not in message.text:
-        return
-
+    if " - " not in message.text: return
     artist, release = message.text.split(" - ", 1)
-    status_msg = await message.answer(f"⏳ Ищу '{release}' от '{artist}'...")
+    status_msg = await message.answer(f"🔍 Ищу...")
 
     result = await scrape_ordistribution(artist.strip(), release.strip())
 
@@ -163,17 +160,11 @@ async def handle_request(message: types.Message):
             await status_msg.edit_text(f"❌ {result['message']}")
         return
 
-    await status_msg.edit_text(f"✅ Найдено и скачано!\n\n`{result['info']}`")
-    
-    try:
-        await message.answer_document(FSInputFile(result["file_path"]))
-        os.remove(result["file_path"])
-    except Exception as e:
-        logger.error(f"Ошибка отправки файла: {e}")
-        await message.answer("Файл на сервере, но отправить не удалось.")
+    await status_msg.edit_text(f"✅ Готово!\n\n`{result['info']}`")
+    await message.answer_document(FSInputFile(result["file_path"]))
+    os.remove(result["file_path"])
 
 async def main():
-    logger.info("Бот запущен!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
