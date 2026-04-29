@@ -96,7 +96,6 @@ def parse_release_info(row_info: str, fallback_artist: str = "", fallback_releas
     upc = ""
     version = ""
 
-    # Сначала пробуем взять название/артиста из первых строк карточки OR.
     if len(raw_lines) >= 2:
         first = raw_lines[0]
         second = raw_lines[1]
@@ -105,7 +104,6 @@ def parse_release_info(row_info: str, fallback_artist: str = "", fallback_releas
         if second and not any(x in second.lower() for x in ["одобрен", "релиз:", "платформа:", "upc", "ean"]):
             artist = second
 
-    # fallback на старый regex по плоскому тексту
     if not title or not artist:
         title_artist_match = re.match(
             r"^\s*(.*?)\s{1,}([^\s].*?)\s+(одобрен|на рассмотрении|отклонен|черновик)",
@@ -223,7 +221,6 @@ async def fill_input_by_prompt(page, prompt_text: str, value: str, press_enter: 
     await target.fill(value, timeout=3000)
     await asyncio.sleep(0.2)
     if press_enter:
-        # В этом UI поле может перерисоваться после fill; подтверждаем через активный фокус.
         await page.keyboard.press("Enter")
     return True
 
@@ -261,7 +258,6 @@ async def fill_select_input_by_field_label(page, field_label: str, value: str, p
 
 
 async def enable_toggle_by_text(page, toggle_text: str):
-    # В MusicAlligator сам input чекбокса часто скрыт, кликабельный элемент - switch/slider рядом с подписью.
     root = page.locator(
         f'.row-toggle:has(p:has-text("{toggle_text}")), '
         f'div:has(> p:has-text("{toggle_text}"))'
@@ -280,7 +276,6 @@ async def enable_toggle_by_text(page, toggle_text: str):
     except Exception:
         pass
 
-    # 1) Пытаемся кликнуть по видимому слайдеру
     slider = root.locator('.slider, .ui-switch, label.ui-switch, span.round').first
     if await slider.count() > 0:
         try:
@@ -291,7 +286,6 @@ async def enable_toggle_by_text(page, toggle_text: str):
         except Exception:
             pass
 
-    # 2) Пытаемся кликнуть по тексту строки
     text_node = root.locator(f'p:has-text("{toggle_text}")').first
     if await text_node.count() > 0:
         try:
@@ -302,7 +296,6 @@ async def enable_toggle_by_text(page, toggle_text: str):
         except Exception:
             pass
 
-    # 3) Fallback: выставляем состояние через JS и шлем события
     await checkbox.evaluate(
         """(el) => {
             if (!el.checked) {
@@ -363,6 +356,7 @@ async def upload_to_musicalligator(release_meta: dict, zip_path: str):
     cover_path = assets["cover_path"]
 
     async with async_playwright() as p:
+        # ИЗМЕНЕНИЕ ТУТ: УСТАНОВЛЕНО headless=True
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(viewport={"width": 1920, "height": 1080})
         page = await context.new_page()
@@ -404,7 +398,6 @@ async def upload_to_musicalligator(release_meta: dict, zip_path: str):
             if not version_ok:
                 await fill_input_by_label(page, "Версия релиза", release_meta.get("version", ""))
 
-            # Лейбл = первый артист; если не найден, создаем лейбл.
             label_ok = await fill_select_input_by_field_label(page, "Лейбл", main_artist, press_enter=True)
             if not label_ok:
                 label_ok = await fill_input_by_prompt(page, "Введите лейбл", main_artist, press_enter=True)
@@ -417,10 +410,8 @@ async def upload_to_musicalligator(release_meta: dict, zip_path: str):
             if await create_label_btn.count() > 0 and await create_label_btn.is_visible():
                 await create_label_btn.click()
 
-            # Оригинальная дата релиза
             date_value = release_meta.get("release_date", "")
             if date_value:
-                # В UI дата обычно с точками.
                 normalized_date = date_value.replace("-", ".")
                 toggle_ok = await enable_toggle_by_text(page, "Оригинальная дата релиза")
                 if not toggle_ok:
@@ -428,7 +419,6 @@ async def upload_to_musicalligator(release_meta: dict, zip_path: str):
 
                 date_ok = await fill_input_by_label(page, "Оригинальная дата релиза", normalized_date)
                 if not date_ok:
-                    # Fallback: календарные поля в блоках даты.
                     date_input = page.locator(
                         '.-full-calendar input[type="text"]:not([disabled]), '
                         '.v-popper input[type="text"]:not([disabled])'
@@ -439,7 +429,6 @@ async def upload_to_musicalligator(release_meta: dict, zip_path: str):
                         await page.keyboard.type(normalized_date, delay=30)
                         await page.keyboard.press("Enter")
 
-            # Свой EAN/UPC
             upc = release_meta.get("upc", "")
             if upc:
                 await enable_toggle_by_text(page, "У меня есть свой EAN/UPC")
@@ -477,17 +466,15 @@ async def scrape_ordistribution(target_artist: str, target_release: str):
         page = await context.new_page()
 
         try:
-            # 1. Авторизация
             await page.goto("https://ordistribution.com/login", timeout=60000)
             await page.fill('input[type="email"]', LOGIN) 
             await page.fill('input[type="password"]', PASSWORD)
             await page.click('button[type="submit"]')
             await page.wait_for_load_state("networkidle")
             
-            # 2. Переход в админку
             logger.info("Переход в админ-панель...")
             await page.goto("https://ordistribution.com/admin/dashboard", timeout=60000)
-            await asyncio.sleep(8) # Даем время скриптам DataTables инициализироваться
+            await asyncio.sleep(8) 
 
             async def set_search_value(search_input, value: str):
                 await search_input.click()
@@ -495,8 +482,6 @@ async def scrape_ordistribution(target_artist: str, target_release: str):
                 await search_input.press("Backspace")
                 await search_input.fill("")
 
-                # Для React-controlled input простого fill не всегда достаточно:
-                # вызываем native setter и вручную диспатчим события ввода.
                 await search_input.evaluate(
                     """(el, newValue) => {
                         const prototype = Object.getPrototypeOf(el);
@@ -542,7 +527,6 @@ async def scrape_ordistribution(target_artist: str, target_release: str):
                 await set_search_value(search_input, search_query)
                 await asyncio.sleep(2)
 
-                # На случай логики, которая запускает фильтр только после подтверждения.
                 await search_input.press("Enter")
                 await asyncio.sleep(3)
 
@@ -555,8 +539,6 @@ async def scrape_ordistribution(target_artist: str, target_release: str):
                 clean_verify = verify_string.strip().lower()
                 search_query_json = json.dumps(search_query)
 
-                # В OR результаты выводятся карточками со множеством вложенных div,
-                # поэтому ищем контейнеры, содержащие текст запроса.
                 card_candidates = await page.locator(
                     f'article:has-text({search_query_json}), '
                     f'section:has-text({search_query_json}), '
@@ -582,7 +564,6 @@ async def scrape_ordistribution(target_artist: str, target_release: str):
                         logger.info(f"Найдена карточка: {clean_card[:250]}")
                         return card
 
-                # Запасной проход по видимым контейнерам на странице.
                 cards = await page.locator("article, section, li, div").all()
                 valid_cards = []
 
@@ -626,7 +607,6 @@ async def scrape_ordistribution(target_artist: str, target_release: str):
                             await asyncio.sleep(2)
                             return True
 
-                # Запасной вариант: если кнопка лежит в общей строке/карточке рядом.
                 row_text = await result_row.inner_text()
                 page_button = page.locator(
                     f'tr:has-text("{row_text[:50]}") button:has-text("Подробнее"), '
@@ -638,7 +618,6 @@ async def scrape_ordistribution(target_artist: str, target_release: str):
                     await asyncio.sleep(2)
                     return True
 
-                # В некоторых карточках детали открываются кликом по самой карточке.
                 if await result_row.is_visible():
                     logger.info("Пробуем открыть карточку кликом по найденному блоку")
                     await result_row.click()
@@ -671,7 +650,6 @@ async def scrape_ordistribution(target_artist: str, target_release: str):
 
                 raise RuntimeError("Кнопка 'Скачать ZIP' не найдена после открытия карточки")
 
-            # Пробуем найти
             result_row = await find_row(target_release, target_artist)
             if not result_row:
                 logger.info("По релизу пусто, пробуем по артисту...")
@@ -821,8 +799,6 @@ async def handle_request(message: types.Message):
         fallback_artist=artist.strip(),
         fallback_release=release.strip()
     )
-    # Название в Aligator всегда берем из входного сообщения,
-    # чтобы исключить искажения при парсинге текста карточки OR.
     release_meta["title"] = release.strip()
     upload_result = await upload_to_musicalligator(release_meta, file_path)
     if upload_result["status"] == "error":
