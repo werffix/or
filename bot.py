@@ -100,7 +100,7 @@ def parse_release_info(row_info: str, fallback_artist: str = "", fallback_releas
         for i, line in enumerate(raw_lines):
             for pattern in label_patterns:
                 same_line = re.search(
-                    rf"{pattern}\s*:?\s*(.+)$",
+                    rf"^\s*{pattern}\s*:?\s*(.+)$",
                     line,
                     flags=re.I
                 )
@@ -109,7 +109,7 @@ def parse_release_info(row_info: str, fallback_artist: str = "", fallback_releas
                     if value:
                         return value
 
-                if re.fullmatch(rf"{pattern}\s*:?", line, flags=re.I):
+                if re.fullmatch(rf"\s*{pattern}\s*:?", line, flags=re.I):
                     for next_line in raw_lines[i + 1:i + 4]:
                         if next_line and not re.fullmatch(
                             r"(Название релиза|Артисты|Исполнитель|Подзаголовок|Версия|Дата релиза|UPC|EAN|Статус|Платформа)\s*:?",
@@ -120,7 +120,7 @@ def parse_release_info(row_info: str, fallback_artist: str = "", fallback_releas
 
         for pattern in label_patterns:
             flat_match = re.search(
-                rf"{pattern}\s*:?\s*(.+?)(?=\s+(Название релиза|Артисты|Исполнитель|Подзаголовок|Версия|Дата релиза|UPC|EAN|Статус|Платформа)\s*:|\s*$)",
+                rf"(?:^|\s){pattern}\s*:?\s*(.+?)(?=\s+(Название релиза|Артисты|Исполнитель|Подзаголовок|Версия|Дата релиза|UPC|EAN|Статус|Платформа)\s*:|\s*$)",
                 info,
                 flags=re.I
             )
@@ -130,7 +130,7 @@ def parse_release_info(row_info: str, fallback_artist: str = "", fallback_releas
         return ""
 
     # Предпочитаем явные поля из OR, если они есть в карточке/деталях.
-    explicit_title = field_value([r"Название релиза", r"Релиз"])
+    explicit_title = field_value([r"Название релиза"])
     explicit_artists = field_value([r"Артисты", r"Исполнитель"])
     explicit_version = field_value([r"Подзаголовок", r"Версия релиза", r"Версия"])
     explicit_date = field_value([r"Дата релиза"])
@@ -236,11 +236,23 @@ async def fill_input_by_label(page, label_text: str, value: str):
     if not value:
         return False
 
-    input_locator = page.locator(
-        f'label:has-text("{label_text}") >> xpath=following::input[1]'
-    ).first
-    if await input_locator.count() == 0:
+    roots = [
+        page.locator(f'.ui-input-row:has(label:has-text("{label_text}"))'),
+        page.locator(f'div:has(> label:has-text("{label_text}"))'),
+    ]
+
+    input_locator = None
+    for root in roots:
+        if await root.count() == 0:
+            continue
+        candidate = root.first.locator('input:not([disabled]), textarea:not([disabled])').first
+        if await candidate.count() > 0:
+            input_locator = candidate
+            break
+
+    if input_locator is None:
         return False
+
     await input_locator.click()
     await input_locator.press("Meta+A")
     await input_locator.press("Backspace")
@@ -288,8 +300,8 @@ async def fill_select_input_by_field_label(page, field_label: str, value: str, p
         return False
 
     roots = [
-        page.locator(f'.ui-artists-select:has(label p:has-text("{field_label}"))'),
-        page.locator(f'.ui-labels-select:has(label p:has-text("{field_label}"))'),
+        page.locator(f'.ui-artists-select:has(label p:text-is("{field_label}"))'),
+        page.locator(f'.ui-labels-select:has(label p:text-is("{field_label}"))'),
     ]
 
     root = None
@@ -312,9 +324,25 @@ async def fill_select_input_by_field_label(page, field_label: str, value: str, p
     await page.keyboard.press("Meta+A")
     await page.keyboard.press("Backspace")
     await input_locator.fill(value, timeout=3000)
-    await asyncio.sleep(0.2)
+    await asyncio.sleep(0.8)
+
+    option_roots = [
+        page.locator('.gs-options'),
+        page.locator('.v-popper__popper'),
+        page.locator('.dropdown'),
+    ]
+    for option_root in option_roots:
+        if await option_root.count() == 0:
+            continue
+        exact_option = option_root.get_by_text(value, exact=True).first
+        if await exact_option.count() > 0 and await exact_option.is_visible():
+            await exact_option.click(timeout=3000)
+            await asyncio.sleep(0.3)
+            return True
+
     if press_enter:
         await page.keyboard.press("Enter")
+        await asyncio.sleep(0.3)
     return True
 
 
@@ -387,8 +415,75 @@ def normalize_musicalligator_date(date_value: str) -> str:
     return value.replace("-", ".")
 
 
+async def set_calendar_input_value(page, input_locator, date_value: str):
+    await input_locator.scroll_into_view_if_needed(timeout=3000)
+    try:
+        await input_locator.click(timeout=3000, force=True)
+        await page.keyboard.press("Meta+A")
+        await page.keyboard.type(date_value, delay=25)
+        await page.keyboard.press("Enter")
+        await asyncio.sleep(0.5)
+        return True
+    except Exception:
+        pass
+
+    try:
+        await input_locator.evaluate(
+            """(el, value) => {
+                el.removeAttribute('disabled');
+                const prototype = Object.getPrototypeOf(el);
+                const valueSetter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
+                if (valueSetter) {
+                    valueSetter.call(el, value);
+                } else {
+                    el.value = value;
+                }
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+                el.dispatchEvent(new Event('blur', { bubbles: true }));
+            }""",
+            date_value,
+        )
+        await asyncio.sleep(0.5)
+        return True
+    except Exception:
+        return False
+
+
+async def set_original_release_date(page, date_value: str):
+    normalized_date = normalize_musicalligator_date(date_value)
+    toggle_ok = await enable_toggle_by_text(page, "Оригинальная дата релиза")
+    if not toggle_ok:
+        logger.warning("Не удалось включить тумблер 'Оригинальная дата релиза'")
+        return False
+
+    await asyncio.sleep(0.8)
+
+    calendar_candidates = [
+        page.locator(
+            '.col-6:has(.row-toggle p:has-text("Оригинальная дата релиза")) '
+            '.-full-calendar input[type="text"]'
+        ).last,
+        page.locator(
+            '.row-select:has(.row-toggle p:has-text("Оригинальная дата релиза")) '
+            '.-full-calendar input[type="text"]'
+        ).last,
+        page.locator('.-full-calendar input[type="text"]:not([disabled])').last,
+        page.locator('.v-popper input[type="text"]:not([disabled])').last,
+    ]
+
+    for date_input in calendar_candidates:
+        if await date_input.count() == 0:
+            continue
+        if await set_calendar_input_value(page, date_input, normalized_date):
+            return True
+
+    logger.warning("Не удалось выбрать оригинальную дату релиза")
+    return False
+
+
 async def click_additional_artist_plus(page):
-    section = page.locator('.ui-artists-select:has(label p:has-text("Дополнительный исполнитель"))').last
+    section = page.locator('.row-add:has(.ui-artists-select label p:text-is("Дополнительный исполнитель"))').last
     candidates = [
         section.locator('button:has(svg), button:has-text("+"), .plus, [class*="plus"]').last,
         page.locator('button:has-text("+"), button[aria-label*="Добав" i], button[title*="Добав" i]').last,
@@ -520,24 +615,7 @@ async def upload_to_musicalligator(release_meta: dict, zip_path: str):
             # Оригинальная дата релиза
             date_value = release_meta.get("release_date", "")
             if date_value:
-                # В UI дата обычно с точками.
-                normalized_date = normalize_musicalligator_date(date_value)
-                toggle_ok = await enable_toggle_by_text(page, "Оригинальная дата релиза")
-                if not toggle_ok:
-                    logger.warning("Не удалось включить тумблер 'Оригинальная дата релиза'")
-
-                date_ok = await fill_input_by_label(page, "Оригинальная дата релиза", normalized_date)
-                if not date_ok:
-                    # Fallback: календарные поля в блоках даты.
-                    date_input = page.locator(
-                        '.-full-calendar input[type="text"]:not([disabled]), '
-                        '.v-popper input[type="text"]:not([disabled])'
-                    ).last
-                    if await date_input.count() > 0:
-                        await date_input.click()
-                        await page.keyboard.press("Meta+A")
-                        await page.keyboard.type(normalized_date, delay=30)
-                        await page.keyboard.press("Enter")
+                await set_original_release_date(page, date_value)
 
             # Свой EAN/UPC
             upc = release_meta.get("upc", "")
