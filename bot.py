@@ -116,7 +116,7 @@ async def scrape_ordistribution(target_artist: str, target_release: str):
                 await asyncio.sleep(3)
 
                 # Ищем все строки в теле таблицы
-                rows = page.locator("table#DataTables_Table_0 tbody tr, table tbody tr, tr").all()
+                rows = await page.locator("table#DataTables_Table_0 tbody tr, table tbody tr, tr").all()
                 
                 valid_rows = []
                 for row in rows:
@@ -141,6 +141,60 @@ async def scrape_ordistribution(target_artist: str, target_release: str):
                 
                 return None
 
+            async def open_release_details(result_row):
+                detail_candidates = [
+                    result_row.get_by_role("button", name="Подробнее"),
+                    result_row.get_by_text("Подробнее", exact=False),
+                    result_row.locator('button:has-text("Подробнее"), a:has-text("Подробнее")'),
+                ]
+
+                for candidate in detail_candidates:
+                    if await candidate.count() > 0:
+                        button = candidate.first
+                        if await button.is_visible():
+                            logger.info("Открываем карточку релиза через 'Подробнее'")
+                            await button.click()
+                            await asyncio.sleep(2)
+                            return True
+
+                # Запасной вариант: если кнопка лежит в общей строке/карточке рядом.
+                row_text = await result_row.inner_text()
+                page_button = page.locator(
+                    f'tr:has-text("{row_text[:50]}") button:has-text("Подробнее"), '
+                    f'tr:has-text("{row_text[:50]}") a:has-text("Подробнее")'
+                ).first
+                if await page_button.count() > 0 and await page_button.is_visible():
+                    logger.info("Открываем карточку релиза через запасной селектор")
+                    await page_button.click()
+                    await asyncio.sleep(2)
+                    return True
+
+                return False
+
+            async def download_zip_from_details():
+                zip_candidates = [
+                    page.get_by_role("button", name="Скачать ZIP"),
+                    page.get_by_role("link", name="Скачать ZIP"),
+                    page.get_by_text("Скачать ZIP", exact=False),
+                    page.locator('button:has-text("Скачать ZIP"), a:has-text("Скачать ZIP")'),
+                    page.locator('button:has-text("ZIP"), a:has-text("ZIP"), a[href*="zip"], a[href*="download"]'),
+                ]
+
+                for candidate in zip_candidates:
+                    if await candidate.count() == 0:
+                        continue
+
+                    button = candidate.first
+                    if not await button.is_visible():
+                        continue
+
+                    logger.info("Найдена кнопка скачивания ZIP")
+                    async with page.expect_download(timeout=60000) as download_info:
+                        await button.click()
+                    return await download_info.value
+
+                raise RuntimeError("Кнопка 'Скачать ZIP' не найдена после открытия карточки")
+
             # Пробуем найти
             result_row = await find_row(target_release, target_artist)
             if not result_row:
@@ -151,16 +205,13 @@ async def scrape_ordistribution(target_artist: str, target_release: str):
                 await browser.close()
                 return {"status": "error", "message": f"Не найден: {target_artist} - {target_release}"}
 
-            # 3. Скачивание ZIP
-            # Ищем ссылку именно внутри найденной строки
-            download_link = result_row.locator('a[href*="download"], a:has-text("ZIP"), a:has-text("ZIP")').first
-            
             row_info = await result_row.inner_text()
-            
-            async with page.expect_download(timeout=60000) as download_info:
-                await download_link.click()
-            
-            download = await download_info.value
+
+            details_opened = await open_release_details(result_row)
+            if not details_opened:
+                raise RuntimeError("Кнопка 'Подробнее' не найдена у найденного релиза")
+
+            download = await download_zip_from_details()
             file_path = os.path.join(downloads_path, download.suggested_filename)
             await download.save_as(file_path)
             
