@@ -1,6 +1,7 @@
 import os
 import logging
 import asyncio
+import json
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -115,32 +116,41 @@ async def scrape_ordistribution(target_artist: str, target_release: str):
                 await search_input.press("Enter")
                 await asyncio.sleep(3)
 
+                body_text = await page.locator("body").inner_text()
+                logger.info(
+                    f"Запрос '{search_query}' в тексте страницы: "
+                    f"{search_query.strip().lower() in body_text.lower()}"
+                )
+
                 clean_verify = verify_string.strip().lower()
+                search_query_json = json.dumps(search_query)
 
-                # В OR результаты выводятся карточками, а не строками таблицы.
-                text_matches = await page.get_by_text(search_query, exact=False).all()
-                logger.info(f"Текстовых совпадений по запросу: {len(text_matches)}")
+                # В OR результаты выводятся карточками со множеством вложенных div,
+                # поэтому ищем контейнеры, содержащие текст запроса.
+                card_candidates = await page.locator(
+                    f'article:has-text({search_query_json}), '
+                    f'section:has-text({search_query_json}), '
+                    f'li:has-text({search_query_json}), '
+                    f'div:has-text({search_query_json})'
+                ).all()
+                logger.info(f"Контейнеров с текстом запроса: {len(card_candidates)}")
 
-                for match in text_matches:
-                    ancestors = await match.locator(
-                        "xpath=ancestor::*[self::div or self::article or self::section or self::li]"
-                    ).all()
+                for card in card_candidates:
+                    if not await card.is_visible():
+                        continue
 
-                    for card in reversed(ancestors[-6:]):
-                        if not await card.is_visible():
-                            continue
+                    card_text = await card.inner_text()
+                    clean_card = " ".join(card_text.split()).lower()
 
-                        card_text = await card.inner_text()
-                        clean_card = " ".join(card_text.split()).lower()
-
-                        if (
-                            clean_verify in clean_card
-                            and len(clean_card) < 2000
-                            and "панель администратора" not in clean_card
-                            and "всего:" not in clean_card
-                        ):
-                            logger.info(f"Найдена карточка: {clean_card[:250]}")
-                            return card
+                    if (
+                        clean_verify in clean_card
+                        and 20 < len(clean_card) < 2000
+                        and "панель администратора" not in clean_card
+                        and "всего:" not in clean_card
+                        and "на рассмотрении:" not in clean_card
+                    ):
+                        logger.info(f"Найдена карточка: {clean_card[:250]}")
+                        return card
 
                 # Запасной проход по видимым контейнерам на странице.
                 cards = await page.locator("article, section, li, div").all()
