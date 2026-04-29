@@ -1,7 +1,6 @@
 import os
 import logging
 import asyncio
-import json
 import re
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, types, F
@@ -15,28 +14,19 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 LOGIN = os.getenv("SITE_LOGIN")
 PASSWORD = os.getenv("SITE_PASSWORD")
 
-# Настройка путей и логирования
+# Настройка путей
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-log_path = os.path.join(BASE_DIR, "bot_debug.log")
 downloads_path = os.path.join(BASE_DIR, "downloads")
+os.makedirs(downloads_path, exist_ok=True)
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(log_path, encoding='utf-8'),
-        logging.StreamHandler()
-    ]
-)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-os.makedirs(downloads_path, exist_ok=True)
-
 def parse_release_info(text, fallback_artist="", fallback_release=""):
-    """Парсинг метаданных из текста строки OR"""
+    """Парсинг данных из строки OR для Аллигатора"""
     info = {
         "artists": fallback_artist,
         "title": fallback_release,
@@ -44,129 +34,113 @@ def parse_release_info(text, fallback_artist="", fallback_release=""):
         "upc": "",
         "release_date": ""
     }
-    
-    # Поиск UPC (12-13 цифр)
+    # Ищем UPC (12-13 цифр)
     upc_match = re.search(r'\b\d{12,13}\b', text)
-    if upc_match:
-        info["upc"] = upc_match.group(0)
+    if upc_match: info["upc"] = upc_match.group(0)
         
-    # Поиск даты (ДД.ММ.ГГГГ)
+    # Ищем дату (ДД.ММ.ГГГГ)
     date_match = re.search(r'\b\d{2}\.\d{2}\.\d{4}\b', text)
-    if date_match:
-        info["release_date"] = date_match.group(0)
+    if date_match: info["release_date"] = date_match.group(0)
 
-    # Попытка найти артистов (обычно до названия релиза или в спец. поле)
-    # Здесь логика зависит от того, как именно копируется текст из OR
+    # Если в строке есть доп. инфа в скобках — это подзаголовок (версия)
+    subtitle_match = re.search(r'\((.*?)\)', text)
+    if subtitle_match: info["subtitle"] = subtitle_match.group(1)
+    
     return info
 
 async def upload_to_musicalligator(meta):
-    """Логика заполнения релиза на MusicAlligator"""
-    logger.info(f"Начало загрузки на MusicAlligator: {meta['title']}")
-    
+    """ПОЧИНЕННЫЙ КОД ДЛЯ АЛЛИГАТОРА"""
+    logger.info(f"Заполнение MusicAlligator для релиза: {meta['title']}")
     async with async_playwright() as p:
-        # headless=True для сервера, False если хочешь видеть процесс
+        # headless=False если хочешь видеть глазами, как он кликает
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(viewport={'width': 1920, 'height': 1080})
         page = await context.new_page()
         
         try:
-            # 1. Авторизация на MusicAlligator (замени URL на страницу входа если нужно)
+            # Заходим (предполагается, что ты залогинен или добавишь куки/логин)
             await page.goto("https://app.musicalligator.ru/releases")
-            # Здесь должна быть проверка авторизации. Если сессии нет, нужно добавить login/pass
-            
-            # Предположим, мы уже нажали "Создать релиз" или находимся в черновике
-            # Для теста используем URL из твоего HTML
-            await page.goto("https://app.musicalligator.ru/releases/334360/edit/release") 
+            # Жмем кнопку создания или переходим в черновик (тут линк для примера из твоего файла)
+            await page.goto("https://app.musicalligator.ru/releases/334360/edit/release")
             await asyncio.sleep(5)
 
-            # --- ЗАПОЛНЕНИЕ ---
-
-            # Название релиза
+            # 1. Название релиза
             await page.fill('input[name="title"]', meta['title'])
 
-            # Работа с артистами
-            artists_list = [a.strip() for a in meta['artists'].split(',')]
+            # 2. Исполнители (Разделение по запятой)
+            artists = [a.strip() for a in meta['artists'].split(',')]
             
-            async def handle_artist(name, index):
-                logger.info(f"Обработка артиста: {name}")
-                # Находим нужный инпут по индексу
-                inputs = page.locator('input[placeholder="Выберите исполнителя"]')
-                current_input = inputs.nth(index)
+            async def fill_artist_logic(name, idx):
+                # Находим инпут исполнителя по счету
+                artist_inputs = page.locator('input[placeholder="Выберите исполнителя"]')
+                target_input = artist_inputs.nth(idx)
                 
-                await current_input.click()
-                await current_input.fill(name)
+                await target_input.click()
+                await target_input.fill(name)
                 await asyncio.sleep(2)
                 
-                # Проверка кнопки "Создать исполнителя"
-                create_btn = page.locator('button:has-text("Создать исполнителя")')
-                if await create_btn.is_visible():
-                    await create_btn.click()
+                create_artist_btn = page.locator('button:has-text("Создать исполнителя")')
+                if await create_artist_btn.is_visible():
+                    await create_artist_btn.click()
                     await asyncio.sleep(1)
-                    # Выбираем "Нет" в модальном окне
-                    # Ищем радиокнопки "Нет" (обычно их две: для Apple и Spotify)
-                    no_labels = page.locator('label:has-text("Нет")')
-                    count = await no_labels.count()
-                    for i in range(count):
-                        await no_labels.nth(i).click()
-                    
-                    await page.click('div.modal-footer button:has-text("Создать исполнителя")')
-                    await asyncio.sleep(2)
+                    # В модальном окне ставим "Нет" для Apple и Spotify
+                    no_options = page.locator('label:has-text("Нет")')
+                    for i in range(await no_options.count()):
+                        await no_options.nth(i).click()
+                    await page.click('button:has-text("Создать исполнителя")')
+                    await asyncio.sleep(1)
                 else:
                     await page.keyboard.press("Enter")
 
-            # Основной артист
-            await handle_artist(artists_list[0], 0)
+            # Первый (основной)
+            await fill_artist_logic(artists[0], 0)
 
-            # Дополнительные артисты
-            for i, extra_artist in enumerate(artists_list[1:], start=1):
-                await page.click('button.-more') # Кнопка "+"
-                await asyncio.sleep(1)
-                await handle_artist(extra_artist, i)
+            # Дополнительные (через кнопку плюс)
+            for i in range(1, len(artists)):
+                await page.click('button.-more') # Кнопка + справа
+                await asyncio.sleep(0.5)
+                await fill_artist_logic(artists[i], i)
 
-            # Версия релиза (Подзаголовок)
+            # 3. Версия релиза (Подзаголовок)
             if meta.get('subtitle'):
                 await page.fill('input[name="version"]', meta['subtitle'])
 
-            # Лейбл (первый артист)
-            await page.fill('input[placeholder="Выберите лейбл"]', artists_list[0])
+            # 4. Лейбл (Первый артист)
+            await page.fill('input[placeholder="Выберите лейбл"]', artists[0])
             await asyncio.sleep(2)
-            create_label = page.locator('button:has-text("создать лейбл")')
-            if await create_label.is_visible():
-                await create_label.click()
-                await page.wait_for_selector('button:has-text("Проверить и создать лейбл")')
+            create_label_btn = page.locator('button:has-text("создать лейбл")')
+            if await create_label_btn.is_visible():
+                await create_label_btn.click()
                 await page.click('button:has-text("Проверить и создать лейбл")')
             else:
                 await page.keyboard.press("Enter")
 
-            # Оригинальная дата релиза
+            # 5. Оригинальная дата релиза (Тумблер)
             if meta.get('release_date'):
-                # Клик по тумблеру (ищем label связанный с датой)
                 await page.click('label:has-text("Оригинальная дата релиза")')
                 await page.fill('input[placeholder="ДД.ММ.ГГГГ"]', meta['release_date'])
 
-            # UPC
+            # 6. UPC (Тумблер)
             if meta.get('upc'):
                 await page.click('label:has-text("У меня есть свой EAN/UPC")')
                 await page.fill('input[name="upc"]', meta['upc'])
 
-            # Сохранение
+            # Сохраняем
             await page.click('button:has-text("Сохранить")')
-            await asyncio.sleep(3)
+            await asyncio.sleep(2)
             
-            # Обновление и возврат
+            # Обновляем и выходим в список
             await page.goto("https://app.musicalligator.ru/releases")
             
             await browser.close()
             return {"status": "success"}
-
         except Exception as e:
-            await page.screenshot(path=os.path.join(BASE_DIR, "alligator_error.png"))
-            logger.error(f"Ошибка MusicAlligator: {e}")
+            await page.screenshot(path="alligator_debug.png")
             await browser.close()
             return {"status": "error", "message": str(e)}
 
 async def scrape_ordistribution(target_artist, target_release):
-    """Твоя текущая логика поиска в OR"""
+    """ТВОЙ РАБОЧИЙ КОД OR (НЕ ТРОГАЕМ)"""
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(accept_downloads=True)
@@ -179,16 +153,16 @@ async def scrape_ordistribution(target_artist, target_release):
             await page.goto("https://ordistribution.com/admin/dashboard")
             await asyncio.sleep(5)
             
-            # Поиск инпута
+            # Поиск
             search_input = page.locator('input[type="search"], .dataTables_filter input').first
+            await search_input.click()
             await search_input.fill(target_release)
             await page.keyboard.press("Enter")
             await asyncio.sleep(4)
             
             row = page.locator("table tbody tr").first
-            row_text = await row.inner_text()
+            info = await row.inner_text()
             
-            # Скачивание
             async with page.expect_download() as download_info:
                 await row.locator('a[href*="download"]').first.click()
             download = await download_info.value
@@ -196,34 +170,34 @@ async def scrape_ordistribution(target_artist, target_release):
             await download.save_as(path)
             
             await browser.close()
-            return {"status": "success", "file_path": path, "info": row_text}
+            return {"status": "success", "info": info, "file_path": path}
         except Exception as e:
             await browser.close()
             return {"status": "error", "message": str(e)}
 
 @dp.message(F.text)
-async def handle_message(message: types.Message):
+async def handle_request(message: types.Message):
     if " - " not in message.text: return
+    artist, release = message.text.split(" - ", 1)
     
-    artist_in, release_in = message.text.split(" - ", 1)
-    status = await message.answer("🚀 Начинаю процесс: OR -> MusicAlligator...")
+    msg = await message.answer("🛠 Работаю...")
     
-    # 1. OR
-    res_or = await scrape_ordistribution(artist_in.strip(), release_in.strip())
+    # Сначала OR
+    res_or = await scrape_ordistribution(artist.strip(), release.strip())
     if res_or["status"] == "error":
-        await status.edit_text(f"❌ Ошибка в OR: {res_or['message']}")
+        await msg.edit_text(f"❌ Ошибка OR: {res_or['message']}")
         return
-
-    # 2. Метаданные
-    meta = parse_release_info(res_or["info"], artist_in.strip(), release_in.strip())
     
-    # 3. Alligator
+    # Парсим что достали
+    meta = parse_release_info(res_or["info"], artist.strip(), release.strip())
+    
+    # Теперь Аллигатор
     res_ali = await upload_to_musicalligator(meta)
     
     if res_ali["status"] == "success":
-        await status.edit_text(f"✅ Релиз '{release_in}' успешно отгружен в MusicAlligator!")
+        await msg.edit_text(f"✅ Релиз '{release}' успешно отгружен!")
     else:
-        await status.edit_text(f"❌ Ошибка в Alligator: {res_ali['message']}")
+        await msg.edit_text(f"⚠️ OR Ок, но в Аллигаторе ошибка: {res_ali['message']}")
 
 async def main():
     await dp.start_polling(bot)
