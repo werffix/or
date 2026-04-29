@@ -38,7 +38,6 @@ async def scrape_ordistribution(target_artist: str, target_release: str):
     
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        # Устанавливаем User-Agent, чтобы сайт не думал, что мы бот
         context = await browser.new_context(
             accept_downloads=True, 
             viewport={'width': 1920, 'height': 1080},
@@ -58,17 +57,16 @@ async def scrape_ordistribution(target_artist: str, target_release: str):
             logger.info("Переход в админ-панель...")
             await page.goto("https://ordistribution.com/admin/dashboard", timeout=60000)
             
-            # Вместо ожидания таблицы, просто ждем немного, пока страница "оживет"
-            await asyncio.sleep(5)
+            # Просто ждем прогрузки интерфейса без привязки к таблице
+            await asyncio.sleep(7)
 
             async def find_row(search_query: str, verify_string: str):
                 logger.info(f"Попытка поиска: {search_query}")
                 
-                # Ищем поле поиска (учитываем твой скриншот с плейсхолдером "Поиск...")
-                search_input = page.locator('input[placeholder*="Поиск"], input[type="search"], .dataTables_filter input, #search').first
+                # Ищем инпут поиска (учитываем плейсхолдер "Поиск..." со скриншота)
+                search_input = page.locator('input[placeholder*="Поиск"], input[type="search"], .dataTables_filter input').first
                 
                 if await search_input.count() == 0:
-                    logger.error("Поле поиска не найдено на странице!")
                     return None
 
                 await search_input.click()
@@ -76,37 +74,33 @@ async def scrape_ordistribution(target_artist: str, target_release: str):
                 await search_input.type(search_query, delay=100)
                 await page.keyboard.press("Enter")
                 
-                # Ждем обновления таблицы
-                await asyncio.sleep(4)
+                await asyncio.sleep(5) # Ждем фильтрации
 
-                # Ищем строки в любой таблице на странице
-                rows = page.locator("table tbody tr")
+                # Берем все строки, которые есть на странице
+                rows = page.locator("tr")
                 count = await rows.count()
                 
                 for i in range(count):
                     row_text = await rows.nth(i).inner_text()
                     if verify_string.lower() in row_text.lower():
-                        logger.info(f"Найдено совпадение!")
+                        logger.info(f"Найдено совпадение в строке!")
                         return rows.nth(i)
                 return None
 
-            # Логика: Релиз -> Артист, если нет, то Артист -> Релиз
+            # Поиск: сначала по релизу, потом по артисту
             result_row = await find_row(target_release, target_artist)
 
             if not result_row:
-                logger.info("Не найдено по релизу, пробуем по артисту...")
+                logger.info("По релизу не найдено, пробуем по артисту...")
                 result_row = await find_row(target_artist, target_release)
 
             if not result_row:
                 await browser.close()
-                return {"status": "error", "message": f"Не удалось найти '{target_release}' от '{target_artist}'"}
+                return {"status": "error", "message": f"Не найден релиз '{target_release}' от '{target_artist}'"}
 
             # 3. Скачивание
             row_info = await result_row.inner_text()
-            logger.info(f"Скачиваем из строки: {row_info}")
-            
-            # Ищем кнопку/ссылку внутри найденной строки
-            download_btn = result_row.locator('a[href*="download"], a:has-text("ZIP"), a:has-text("Скачать"), button:has-text("ZIP")').first
+            download_btn = result_row.locator('a[href*="download"], a:has-text("ZIP"), a:has-text("Скачать")').first
             
             async with page.expect_download(timeout=60000) as download_info:
                 await download_btn.click()
@@ -116,26 +110,24 @@ async def scrape_ordistribution(target_artist: str, target_release: str):
             await download.save_as(file_path)
             
             await browser.close()
-            return {"status": "success", "info": row_info.replace("\t", " ").strip(), "file_path": file_path}
+            return {"status": "success", "info": row_info.replace("\n", " ").strip(), "file_path": file_path}
 
         except Exception as e:
             error_img = os.path.join(BASE_DIR, "error_debug.png")
             await page.screenshot(path=error_img)
             logger.error(f"Ошибка: {e}", exc_info=True)
             await browser.close()
-            return {"status": "error", "message": f"Ошибка: {str(e)[:50]}"}
+            return {"status": "error", "message": f"Ошибка системы (скриншот в боте)"}
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await message.answer("Пришли: `Артист - Название релиза` (например: Le Bober - Prayer In C)")
+    await message.answer("Пришли: `Артист - Название релиза`.")
 
 @dp.message(F.text)
 async def handle_request(message: types.Message):
-    if " - " not in message.text:
-        return
-
+    if " - " not in message.text: return
     artist, release = message.text.split(" - ", 1)
-    status_msg = await message.answer("🔍 Ищу и проверяю данные...")
+    status_msg = await message.answer(f"⏳ Проверяю '{release}'...")
 
     result = await scrape_ordistribution(artist.strip(), release.strip())
 
@@ -152,7 +144,6 @@ async def handle_request(message: types.Message):
     os.remove(result["file_path"])
 
 async def main():
-    logger.info("Бот запущен!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
