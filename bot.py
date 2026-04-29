@@ -203,6 +203,7 @@ def extract_zip_assets(zip_path: str):
 
     cover_path = None
     cover_candidates = []
+    wav_paths = []
     for root, _, files in os.walk(target_dir):
         for file_name in files:
             lower = file_name.lower()
@@ -213,12 +214,23 @@ def extract_zip_assets(zip_path: str):
                     score += 10
                 score += max(0, 8 - len(Path(file_name).stem))
                 cover_candidates.append((score, full))
+            elif lower.endswith(".wav"):
+                wav_paths.append(full)
 
     if cover_candidates:
         cover_candidates.sort(key=lambda x: x[0], reverse=True)
         cover_path = cover_candidates[0][1]
 
-    return {"extract_dir": target_dir, "cover_path": cover_path}
+    def wav_sort_key(path):
+        name = Path(path).name
+        prefix_match = re.match(r"^\D*([0-9]{1,3})", name)
+        if prefix_match:
+            return (int(prefix_match.group(1)), name.lower())
+        return (9999, name.lower())
+
+    wav_paths.sort(key=wav_sort_key)
+
+    return {"extract_dir": target_dir, "cover_path": cover_path, "wav_paths": wav_paths}
 
 
 async def login_musicalligator(page, email: str, password: str):
@@ -482,6 +494,118 @@ async def set_original_release_date(page, date_value: str):
     return False
 
 
+async def select_release_type(page, type_text: str):
+    type_card = page.locator(f'.release-type .type:has(p:text-is("{type_text}"))').first
+    if await type_card.count() == 0:
+        logger.warning("Не найден тип релиза: %s", type_text)
+        return False
+
+    try:
+        class_attr = await type_card.get_attribute("class") or ""
+        if "-active" in class_attr:
+            return True
+    except Exception:
+        pass
+
+    await type_card.click(timeout=5000)
+    await asyncio.sleep(1)
+    return True
+
+
+async def go_to_tracks_step(page):
+    button = page.locator('button:has-text("Перейти к загрузке треков")').first
+    if await button.count() == 0:
+        logger.warning("Кнопка 'Перейти к загрузке треков' не найдена")
+        return False
+
+    await button.scroll_into_view_if_needed(timeout=3000)
+    await button.click(timeout=5000)
+    await page.wait_for_selector('.release-track, input[type="file"][accept*="audio"]', timeout=90000)
+    await asyncio.sleep(1)
+    return True
+
+
+async def ensure_track_slots(page, track_count: int):
+    if track_count <= 1:
+        return True
+
+    for _ in range(track_count - 1):
+        current_count = await page.locator('.release-track').count()
+        if current_count >= track_count:
+            return True
+
+        add_button = page.locator('.release-track-add:not(.disabled), .release-track-add').last
+        if await add_button.count() == 0:
+            logger.warning("Кнопка 'Добавить трек' не найдена")
+            return False
+
+        await add_button.scroll_into_view_if_needed(timeout=3000)
+        class_attr = await add_button.get_attribute("class") or ""
+        if "disabled" in class_attr:
+            logger.warning("Кнопка 'Добавить трек' отключена")
+            return False
+
+        await add_button.click(timeout=5000)
+        await asyncio.sleep(1)
+
+    return await page.locator('.release-track').count() >= track_count
+
+
+async def open_track_card(track):
+    file_input = track.locator('input[type="file"][accept*="audio"]').first
+    if await file_input.count() > 0:
+        return True
+
+    toggles = [
+        track.locator('.-track-counter .-toggle').first,
+        track.locator('.-track-counter svg').first,
+        track.locator('h4:has-text("Трек")').first,
+    ]
+
+    for toggle in toggles:
+        if await toggle.count() == 0:
+            continue
+        try:
+            await toggle.scroll_into_view_if_needed(timeout=3000)
+            await toggle.click(timeout=5000)
+            await asyncio.sleep(0.8)
+            if await file_input.count() > 0:
+                return True
+        except Exception:
+            pass
+
+    return await file_input.count() > 0
+
+
+async def upload_wav_tracks(page, wav_paths):
+    if not wav_paths:
+        logger.warning("В архиве нет WAV-файлов для загрузки треков")
+        return False
+
+    await ensure_track_slots(page, len(wav_paths))
+
+    for index, wav_path in enumerate(wav_paths):
+        tracks = page.locator('.release-track')
+        if await tracks.count() <= index:
+            logger.warning("Не найден блок %s-го трека", index + 1)
+            return False
+
+        track = tracks.nth(index)
+        await track.scroll_into_view_if_needed(timeout=5000)
+        await open_track_card(track)
+
+        file_input = track.locator('input[type="file"][accept*="audio"]').first
+        if await file_input.count() == 0:
+            logger.warning("Не найден input загрузки для %s-го трека", index + 1)
+            return False
+
+        logger.info("Загружаем WAV для %s-го трека: %s", index + 1, wav_path)
+        await file_input.set_input_files(wav_path)
+        await asyncio.sleep(3)
+
+    return True
+
+
 async def click_additional_artist_plus(page):
     section = page.locator('.row-add:has(.ui-artists-select label p:text-is("Дополнительный исполнитель"))').last
     candidates = [
@@ -549,6 +673,7 @@ async def upload_to_musicalligator(release_meta: dict, zip_path: str):
 
     assets = extract_zip_assets(zip_path)
     cover_path = assets["cover_path"]
+    wav_paths = assets.get("wav_paths", [])
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
@@ -565,6 +690,10 @@ async def upload_to_musicalligator(release_meta: dict, zip_path: str):
             await page.locator('button:has-text("Новый релиз")').first.click()
             await page.wait_for_selector('input[type="file"][accept*="image"]', timeout=90000)
             await asyncio.sleep(2)
+
+            if len(wav_paths) >= 3:
+                current_step = "select_release_type"
+                await select_release_type(page, "EP / Альбом")
 
             if cover_path:
                 current_step = "upload_cover"
@@ -625,6 +754,15 @@ async def upload_to_musicalligator(release_meta: dict, zip_path: str):
                 if not upc_ok:
                     await fill_input_by_label(page, "EAN/UPC", upc)
 
+            if wav_paths:
+                current_step = "upload_tracks"
+                if await go_to_tracks_step(page):
+                    tracks_uploaded = await upload_wav_tracks(page, wav_paths)
+                    if not tracks_uploaded:
+                        raise RuntimeError("Не удалось загрузить WAV-треки")
+                else:
+                    raise RuntimeError("Не удалось перейти к загрузке треков")
+
             current_step = "return_releases"
             await page.reload(timeout=90000, wait_until="domcontentloaded")
             await page.goto("https://app.musicalligator.ru/releases", timeout=90000, wait_until="domcontentloaded")
@@ -632,7 +770,8 @@ async def upload_to_musicalligator(release_meta: dict, zip_path: str):
 
             await browser.close()
             no_cover_note = " (без обложки)" if not cover_path else ""
-            return {"status": "success", "message": f"Релиз отправлен в кабинет {account['note']} ({account['email']}){no_cover_note}"}
+            tracks_note = f", WAV-треков: {len(wav_paths)}" if wav_paths else ""
+            return {"status": "success", "message": f"Релиз отправлен в кабинет {account['note']} ({account['email']}){no_cover_note}{tracks_note}"}
         except Exception as e:
             debug_path = os.path.join(BASE_DIR, "error_musicalligator.png")
             try:
@@ -1047,25 +1186,16 @@ async def cmd_accounts(message: types.Message):
 
     await message.answer("Неизвестная команда. Используй /accounts")
 
-@dp.message(F.text)
-async def handle_request(message: types.Message):
-    if not is_authorized(message):
-        await message.answer("⛔ Доступ запрещен")
-        return
-
-    if " - " not in message.text: return
-    artist, release = message.text.split(" - ", 1)
-    status_msg = await message.answer(f"🔍 Ищу...")
-
+async def process_release_line(status_msg, artist: str, release: str, prefix: str = ""):
     result = await scrape_ordistribution(artist.strip(), release.strip())
 
     if result["status"] == "error":
         error_file = os.path.join(BASE_DIR, "error_debug.png")
         if os.path.exists(error_file):
-            await message.answer_photo(FSInputFile(error_file), caption=f"❌ {result['message']}")
+            await bot.send_photo(status_msg.chat.id, FSInputFile(error_file), caption=f"❌ {prefix}{result['message']}")
         else:
-            await status_msg.edit_text(f"❌ {result['message']}")
-        return
+            await status_msg.edit_text(f"❌ {prefix}{result['message']}")
+        return {"status": "error", "message": result["message"]}
 
     file_path = result["file_path"]
     file_size = os.path.getsize(file_path)
@@ -1079,20 +1209,74 @@ async def handle_request(message: types.Message):
     upload_result = await upload_to_musicalligator(release_meta, file_path)
     if upload_result["status"] == "error":
         await status_msg.edit_text(
-            "⚠️ ZIP скачан, но автозагрузка в MusicAlligator не завершилась.\n\n"
+            f"⚠️ {prefix}ZIP скачан, но автозагрузка в MusicAlligator не завершилась.\n\n"
             f"`{upload_result['message']}`\n\n"
             f"Файл: `{os.path.basename(file_path)}`\n"
             f"Размер: `{file_size_mb:.1f} MB`\n"
             f"Путь: `{file_path}`"
         )
+        return {"status": "error", "message": upload_result["message"]}
+
+    return {
+        "status": "success",
+        "message": upload_result["message"],
+        "zip": os.path.basename(file_path),
+        "info": result["info"],
+    }
+
+
+@dp.message(F.text)
+async def handle_request(message: types.Message):
+    if not is_authorized(message):
+        await message.answer("⛔ Доступ запрещен")
         return
 
-    await status_msg.edit_text(
-        "✅ Готово: релиз обработан и отправлен в MusicAlligator.\n\n"
-        f"`{result['info']}`\n\n"
-        f"{upload_result['message']}\n"
-        f"Файл ZIP: `{os.path.basename(file_path)}`"
-    )
+    release_lines = []
+    for line in (message.text or "").splitlines():
+        line = line.strip()
+        if " - " not in line:
+            continue
+        artist, release = line.split(" - ", 1)
+        artist = artist.strip()
+        release = release.strip()
+        if artist and release:
+            release_lines.append((artist, release))
+
+    if not release_lines:
+        return
+
+    status_msg = await message.answer(f"🔍 В очереди релизов: {len(release_lines)}")
+    results = []
+
+    for index, (artist, release) in enumerate(release_lines, start=1):
+        prefix = f"[{index}/{len(release_lines)}] {artist} - {release}: "
+        await status_msg.edit_text(f"🔍 {prefix}ищу в OR...")
+        result = await process_release_line(status_msg, artist, release, prefix=prefix)
+        results.append((artist, release, result))
+
+        if result["status"] == "error":
+            if len(release_lines) == 1:
+                return
+            await asyncio.sleep(1)
+            continue
+
+        await status_msg.edit_text(f"✅ {prefix}готово\n{result['message']}")
+
+    if len(release_lines) == 1:
+        artist, release, result = results[0]
+        if result["status"] == "success":
+            await status_msg.edit_text(
+                "✅ Готово: релиз обработан и отправлен в MusicAlligator.\n\n"
+                f"{result['message']}\n"
+                f"Файл ZIP: `{result['zip']}`"
+            )
+        return
+
+    lines = ["Готово по очереди:"]
+    for index, (artist, release, result) in enumerate(results, start=1):
+        mark = "✅" if result["status"] == "success" else "❌"
+        lines.append(f"{mark} {index}. {artist} - {release}: {result['message']}")
+    await status_msg.edit_text("\n".join(lines))
 
 async def main():
     await dp.start_polling(bot)
