@@ -223,7 +223,6 @@ async def fill_input_by_prompt(page, prompt_text: str, value: str, press_enter: 
     await target.fill(value, timeout=3000)
     await asyncio.sleep(0.2)
     if press_enter:
-        # В этом UI поле может перерисоваться после fill; подтверждаем через активный фокус.
         await page.keyboard.press("Enter")
     return True
 
@@ -261,7 +260,6 @@ async def fill_select_input_by_field_label(page, field_label: str, value: str, p
 
 
 async def enable_toggle_by_text(page, toggle_text: str):
-    # В MusicAlligator сам input чекбокса часто скрыт, кликабельный элемент - switch/slider рядом с подписью.
     root = page.locator(
         f'.row-toggle:has(p:has-text("{toggle_text}")), '
         f'div:has(> p:has-text("{toggle_text}"))'
@@ -302,7 +300,7 @@ async def enable_toggle_by_text(page, toggle_text: str):
         except Exception:
             pass
 
-    # 3) Fallback: выставляем состояние через JS и шлем события
+    # 3) Fallback
     await checkbox.evaluate(
         """(el) => {
             if (!el.checked) {
@@ -324,31 +322,55 @@ async def set_artist_with_create_fallback(page, label_text: str, artist_name: st
         "Исполнитель": "Введите основного исполнителя",
         "Дополнительный исполнитель": "Введите доп. исполнителя",
         "При участии (feat.)": "Введите feat. исполнителя",
+        "Лейбл": "Введите лейбл"
     }
     prompt = prompt_map.get(label_text, "")
 
-    ok = await fill_select_input_by_field_label(page, label_text, artist_name, press_enter=True)
+    # Передаем press_enter=False, чтобы избежать ложных срабатываний
+    ok = await fill_select_input_by_field_label(page, label_text, artist_name, press_enter=False)
     if not ok and prompt:
-        ok = await fill_input_by_prompt(page, prompt, artist_name, press_enter=True)
+        ok = await fill_input_by_prompt(page, prompt, artist_name, press_enter=False)
     if not ok:
         ok = await fill_input_by_label(page, label_text, artist_name)
-        if ok:
-            artist_input = page.locator('input:focus').first
-            if await artist_input.count() > 0:
-                await artist_input.press("Enter")
+    
     if not ok:
-        logger.warning("Не удалось заполнить поле артиста: %s", label_text)
+        logger.warning("Не удалось заполнить поле: %s", label_text)
         return
 
     await asyncio.sleep(1)
+
+    # Логика выбора из выпадающего списка (вместо Enter)
+    first_option = page.locator(
+        '.multiselect-option, .gs-search-list-item, .dropdown-item'
+    ).first
+
+    if await first_option.count() > 0:
+        await first_option.click()
+
+    await asyncio.sleep(1)
+    
     create_btn = page.locator('button:has-text("Создать исполнителя"), div:has-text("Создать исполнителя")').first
     if await create_btn.count() > 0 and await create_btn.is_visible():
         await create_btn.click()
         await asyncio.sleep(1)
-        no_buttons = page.locator('button:has-text("Нет"), div:has-text("Нет")')
-        if await no_buttons.count() >= 2:
-            await no_buttons.nth(0).click()
-            await no_buttons.nth(1).click()
+        
+        # Надежная логика прокликивания "Нет" для Apple Music и Spotify
+        apple_toggle = page.locator(
+            'text="Есть ли у этого исполнителя профиль в Apple Music?"'
+        ).locator("..").locator('button:has-text("Нет")').first
+
+        spotify_toggle = page.locator(
+            'text="Есть ли у этого исполнителя профиль в Spotify?"'
+        ).locator("..").locator('button:has-text("Нет")').first
+
+        if await apple_toggle.count() > 0:
+            await apple_toggle.click()
+
+        if await spotify_toggle.count() > 0:
+            await spotify_toggle.click()
+
+        await asyncio.sleep(0.5)
+
         create_final = page.locator('button:has-text("Создать исполнителя")').last
         if await create_final.count() > 0 and await create_final.is_visible():
             await create_final.click()
@@ -363,7 +385,8 @@ async def upload_to_musicalligator(release_meta: dict, zip_path: str):
     cover_path = assets["cover_path"]
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        # ВАЖНО: headless=False для корректной работы MusicAlligator
+        browser = await p.chromium.launch(headless=False)
         context = await browser.new_context(viewport={"width": 1920, "height": 1080})
         page = await context.new_page()
         page.set_default_timeout(90000)
@@ -386,14 +409,30 @@ async def upload_to_musicalligator(release_meta: dict, zip_path: str):
             else:
                 logger.warning("В ZIP не найдена обложка — продолжаем без загрузки обложки")
 
+            current_step = "fill_artist"
             artists = release_meta.get("artists", [])
             main_artist = artists[0] if artists else ""
             extra_artists = artists[1:] if len(artists) > 1 else []
 
-            current_step = "fill_artist"
+            # Основной артист
             await set_artist_with_create_fallback(page, "Исполнитель", main_artist)
-            if extra_artists:
-                await set_artist_with_create_fallback(page, "Дополнительный исполнитель", extra_artists[0])
+
+            # Доп артисты
+            for index, artist in enumerate(extra_artists):
+                if index > 0:
+                    plus_btn = page.locator(
+                        'button:has(svg), .add-button, .plus'
+                    ).filter(has_text="+").last
+
+                    if await plus_btn.count() > 0:
+                        await plus_btn.click()
+                        await asyncio.sleep(1)
+
+                await set_artist_with_create_fallback(
+                    page,
+                    "Дополнительный исполнитель",
+                    artist
+                )
 
             current_step = "fill_release_fields"
             title_ok = await fill_input_by_prompt(page, "Введите название релиза", release_meta.get("title", ""))
@@ -404,23 +443,19 @@ async def upload_to_musicalligator(release_meta: dict, zip_path: str):
             if not version_ok:
                 await fill_input_by_label(page, "Версия релиза", release_meta.get("version", ""))
 
-            # Лейбл = первый артист; если не найден, создаем лейбл.
-            label_ok = await fill_select_input_by_field_label(page, "Лейбл", main_artist, press_enter=True)
-            if not label_ok:
-                label_ok = await fill_input_by_prompt(page, "Введите лейбл", main_artist, press_enter=True)
-            if not label_ok:
-                label_ok = await fill_input_by_label(page, "Лейбл", main_artist)
-            if not label_ok:
-                logger.warning("Не удалось заполнить поле лейбла")
-            await asyncio.sleep(1)
-            create_label_btn = page.locator('button:has-text("Проверить и создать лейбл"), div:has-text("Проверить и создать лейбл")').first
+            # Лейбл
+            await set_artist_with_create_fallback(page, "Лейбл", main_artist)
+            
+            create_label_btn = page.locator(
+                'button:has-text("Проверить и создать лейбл"), div:has-text("Проверить и создать лейбл")'
+            ).first
+            
             if await create_label_btn.count() > 0 and await create_label_btn.is_visible():
                 await create_label_btn.click()
 
             # Оригинальная дата релиза
             date_value = release_meta.get("release_date", "")
             if date_value:
-                # В UI дата обычно с точками.
                 normalized_date = date_value.replace("-", ".")
                 toggle_ok = await enable_toggle_by_text(page, "Оригинальная дата релиза")
                 if not toggle_ok:
@@ -428,7 +463,6 @@ async def upload_to_musicalligator(release_meta: dict, zip_path: str):
 
                 date_ok = await fill_input_by_label(page, "Оригинальная дата релиза", normalized_date)
                 if not date_ok:
-                    # Fallback: календарные поля в блоках даты.
                     date_input = page.locator(
                         '.-full-calendar input[type="text"]:not([disabled]), '
                         '.v-popper input[type="text"]:not([disabled])'
@@ -448,12 +482,16 @@ async def upload_to_musicalligator(release_meta: dict, zip_path: str):
                     await fill_input_by_label(page, "EAN/UPC", upc)
 
             current_step = "return_releases"
+            # Обновление страницы для сброса стейтов перед возвратом
+            await page.reload()
+            await asyncio.sleep(2)
             await page.goto("https://app.musicalligator.ru/releases", timeout=90000, wait_until="domcontentloaded")
             await page.wait_for_selector('button:has-text("Новый релиз")', timeout=90000)
 
             await browser.close()
             no_cover_note = " (без обложки)" if not cover_path else ""
             return {"status": "success", "message": f"Релиз отправлен в кабинет {account['note']} ({account['email']}){no_cover_note}"}
+            
         except Exception as e:
             debug_path = os.path.join(BASE_DIR, "error_musicalligator.png")
             try:
@@ -495,8 +533,6 @@ async def scrape_ordistribution(target_artist: str, target_release: str):
                 await search_input.press("Backspace")
                 await search_input.fill("")
 
-                # Для React-controlled input простого fill не всегда достаточно:
-                # вызываем native setter и вручную диспатчим события ввода.
                 await search_input.evaluate(
                     """(el, newValue) => {
                         const prototype = Object.getPrototypeOf(el);
@@ -542,7 +578,6 @@ async def scrape_ordistribution(target_artist: str, target_release: str):
                 await set_search_value(search_input, search_query)
                 await asyncio.sleep(2)
 
-                # На случай логики, которая запускает фильтр только после подтверждения.
                 await search_input.press("Enter")
                 await asyncio.sleep(3)
 
@@ -555,8 +590,6 @@ async def scrape_ordistribution(target_artist: str, target_release: str):
                 clean_verify = verify_string.strip().lower()
                 search_query_json = json.dumps(search_query)
 
-                # В OR результаты выводятся карточками со множеством вложенных div,
-                # поэтому ищем контейнеры, содержащие текст запроса.
                 card_candidates = await page.locator(
                     f'article:has-text({search_query_json}), '
                     f'section:has-text({search_query_json}), '
@@ -582,7 +615,6 @@ async def scrape_ordistribution(target_artist: str, target_release: str):
                         logger.info(f"Найдена карточка: {clean_card[:250]}")
                         return card
 
-                # Запасной проход по видимым контейнерам на странице.
                 cards = await page.locator("article, section, li, div").all()
                 valid_cards = []
 
@@ -626,7 +658,6 @@ async def scrape_ordistribution(target_artist: str, target_release: str):
                             await asyncio.sleep(2)
                             return True
 
-                # Запасной вариант: если кнопка лежит в общей строке/карточке рядом.
                 row_text = await result_row.inner_text()
                 page_button = page.locator(
                     f'tr:has-text("{row_text[:50]}") button:has-text("Подробнее"), '
@@ -638,7 +669,6 @@ async def scrape_ordistribution(target_artist: str, target_release: str):
                     await asyncio.sleep(2)
                     return True
 
-                # В некоторых карточках детали открываются кликом по самой карточке.
                 if await result_row.is_visible():
                     logger.info("Пробуем открыть карточку кликом по найденному блоку")
                     await result_row.click()
@@ -671,7 +701,6 @@ async def scrape_ordistribution(target_artist: str, target_release: str):
 
                 raise RuntimeError("Кнопка 'Скачать ZIP' не найдена после открытия карточки")
 
-            # Пробуем найти
             result_row = await find_row(target_release, target_artist)
             if not result_row:
                 logger.info("По релизу пусто, пробуем по артисту...")
@@ -821,8 +850,6 @@ async def handle_request(message: types.Message):
         fallback_artist=artist.strip(),
         fallback_release=release.strip()
     )
-    # Название в Aligator всегда берем из входного сообщения,
-    # чтобы исключить искажения при парсинге текста карточки OR.
     release_meta["title"] = release.strip()
     upload_result = await upload_to_musicalligator(release_meta, file_path)
     if upload_result["status"] == "error":
