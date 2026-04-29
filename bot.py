@@ -153,13 +153,14 @@ def extract_zip_assets(zip_path: str):
 
 
 async def login_musicalligator(page, email: str, password: str):
-    await page.goto("https://app.musicalligator.ru/auth/signin", timeout=60000)
+    await page.goto("https://app.musicalligator.ru/auth/signin", timeout=90000, wait_until="domcontentloaded")
+    await page.wait_for_selector('input[type="email"]', timeout=90000)
     await page.fill('input[type="email"]', email)
     await page.fill('input[type="password"]', password)
     await page.click('button:has-text("Продолжить")')
-    await page.wait_for_load_state("networkidle")
-    await page.goto("https://app.musicalligator.ru/releases", timeout=60000)
-    await page.wait_for_load_state("networkidle")
+    await page.wait_for_url("**/releases**", timeout=90000)
+    await page.goto("https://app.musicalligator.ru/releases", timeout=90000, wait_until="domcontentloaded")
+    await page.wait_for_selector('button:has-text("Новый релиз")', timeout=90000)
 
 
 async def fill_input_by_label(page, label_text: str, value: str):
@@ -214,14 +215,19 @@ async def upload_to_musicalligator(release_meta: dict, zip_path: str):
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(viewport={"width": 1920, "height": 1080})
         page = await context.new_page()
+        page.set_default_timeout(90000)
+        current_step = "init"
 
         try:
+            current_step = "login"
             await login_musicalligator(page, account["email"], account["password"])
 
-            await page.click('button:has-text("Новый релиз")')
-            await page.wait_for_load_state("networkidle")
+            current_step = "click_new_release"
+            await page.locator('button:has-text("Новый релиз")').first.click()
+            await page.wait_for_selector('input[type="file"][accept*="image"]', timeout=90000)
             await asyncio.sleep(2)
 
+            current_step = "upload_cover"
             file_input = page.locator('input[type="file"][accept*="image"]').first
             await file_input.set_input_files(cover_path)
             await asyncio.sleep(1)
@@ -230,10 +236,12 @@ async def upload_to_musicalligator(release_meta: dict, zip_path: str):
             main_artist = artists[0] if artists else ""
             extra_artists = artists[1:] if len(artists) > 1 else []
 
+            current_step = "fill_artist"
             await set_artist_with_create_fallback(page, "Исполнитель", main_artist)
             if extra_artists:
                 await set_artist_with_create_fallback(page, "Дополнительный исполнитель", extra_artists[0])
 
+            current_step = "fill_release_fields"
             await fill_input_by_label(page, "Название релиза", release_meta.get("title", ""))
             await fill_input_by_label(page, "Версия релиза", release_meta.get("version", ""))
 
@@ -260,14 +268,21 @@ async def upload_to_musicalligator(release_meta: dict, zip_path: str):
                     await upc_toggle.check()
                 await fill_input_by_label(page, "EAN/UPC", upc)
 
-            await page.goto("https://app.musicalligator.ru/releases", timeout=60000)
-            await page.wait_for_load_state("networkidle")
+            current_step = "return_releases"
+            await page.goto("https://app.musicalligator.ru/releases", timeout=90000, wait_until="domcontentloaded")
+            await page.wait_for_selector('button:has-text("Новый релиз")', timeout=90000)
 
             await browser.close()
             return {"status": "success", "message": f"Релиз отправлен в кабинет {account['note']} ({account['email']})"}
         except Exception as e:
+            debug_path = os.path.join(BASE_DIR, "error_musicalligator.png")
+            try:
+                await page.screenshot(path=debug_path, full_page=True)
+            except Exception:
+                pass
             await browser.close()
-            return {"status": "error", "message": f"Ошибка MusicAlligator: {str(e)[:120]}"}
+            logger.error("Ошибка MusicAlligator на шаге '%s': %s", current_step, e, exc_info=True)
+            return {"status": "error", "message": f"Ошибка MusicAlligator (шаг: {current_step}): {str(e)[:180]}"}
 
 async def scrape_ordistribution(target_artist: str, target_release: str):
     logger.info(f"Запуск глубокого поиска для: {target_artist} - {target_release}")
