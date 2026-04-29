@@ -179,6 +179,62 @@ async def fill_input_by_label(page, label_text: str, value: str):
     return True
 
 
+async def enable_toggle_by_text(page, toggle_text: str):
+    # В MusicAlligator сам input чекбокса часто скрыт, кликабельный элемент - switch/slider рядом с подписью.
+    root = page.locator(
+        f'.row-toggle:has(p:has-text("{toggle_text}")), '
+        f'div:has(> p:has-text("{toggle_text}"))'
+    ).first
+
+    if await root.count() == 0:
+        return False
+
+    checkbox = root.locator('input[type="checkbox"]').first
+    if await checkbox.count() == 0:
+        return False
+
+    try:
+        if await checkbox.is_checked():
+            return True
+    except Exception:
+        pass
+
+    # 1) Пытаемся кликнуть по видимому слайдеру
+    slider = root.locator('.slider, .ui-switch, label.ui-switch, span.round').first
+    if await slider.count() > 0:
+        try:
+            await slider.click(timeout=3000)
+            await asyncio.sleep(0.2)
+            if await checkbox.is_checked():
+                return True
+        except Exception:
+            pass
+
+    # 2) Пытаемся кликнуть по тексту строки
+    text_node = root.locator(f'p:has-text("{toggle_text}")').first
+    if await text_node.count() > 0:
+        try:
+            await text_node.click(timeout=3000)
+            await asyncio.sleep(0.2)
+            if await checkbox.is_checked():
+                return True
+        except Exception:
+            pass
+
+    # 3) Fallback: выставляем состояние через JS и шлем события
+    await checkbox.evaluate(
+        """(el) => {
+            if (!el.checked) {
+                el.checked = true;
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+        }"""
+    )
+    await asyncio.sleep(0.2)
+    return await checkbox.is_checked()
+
+
 async def set_artist_with_create_fallback(page, label_text: str, artist_name: str):
     if not artist_name:
         return
@@ -255,17 +311,13 @@ async def upload_to_musicalligator(release_meta: dict, zip_path: str):
             # Оригинальная дата релиза
             date_value = release_meta.get("release_date", "")
             if date_value:
-                orig_toggle = page.locator('p:has-text("Оригинальная дата релиза") >> xpath=preceding::input[@type="checkbox"][1]').first
-                if await orig_toggle.count() > 0 and not await orig_toggle.is_checked():
-                    await orig_toggle.check()
+                await enable_toggle_by_text(page, "Оригинальная дата релиза")
                 await fill_input_by_label(page, "Оригинальная дата релиза", date_value)
 
             # Свой EAN/UPC
             upc = release_meta.get("upc", "")
             if upc:
-                upc_toggle = page.locator('p:has-text("У меня есть свой EAN/UPC") >> xpath=preceding::input[@type="checkbox"][1]').first
-                if await upc_toggle.count() > 0 and not await upc_toggle.is_checked():
-                    await upc_toggle.check()
+                await enable_toggle_by_text(page, "У меня есть свой EAN/UPC")
                 await fill_input_by_label(page, "EAN/UPC", upc)
 
             current_step = "return_releases"
