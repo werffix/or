@@ -86,19 +86,37 @@ def active_account():
     return accounts[idx]
 
 
-def parse_release_info(row_info: str):
+def parse_release_info(row_info: str, fallback_artist: str = "", fallback_release: str = ""):
     info = " ".join(row_info.split())
+    raw_lines = [line.strip() for line in row_info.splitlines() if line.strip()]
 
-    title = ""
-    artist = ""
+    title = fallback_release.strip()
+    artist = fallback_artist.strip()
     release_date = ""
     upc = ""
     version = ""
 
-    title_artist_match = re.match(r"^\s*(.*?)\s{1,}([^\s].*?)\s+(одобрен|на рассмотрении|отклонен|черновик)", info, flags=re.I)
-    if title_artist_match:
-        title = title_artist_match.group(1).strip()
-        artist = title_artist_match.group(2).strip()
+    # Сначала пробуем взять название/артиста из первых строк карточки OR.
+    if len(raw_lines) >= 2:
+        first = raw_lines[0]
+        second = raw_lines[1]
+        if first and not any(x in first.lower() for x in ["одобрен", "релиз:", "платформа:", "upc", "ean"]):
+            title = first
+        if second and not any(x in second.lower() for x in ["одобрен", "релиз:", "платформа:", "upc", "ean"]):
+            artist = second
+
+    # fallback на старый regex по плоскому тексту
+    if not title or not artist:
+        title_artist_match = re.match(
+            r"^\s*(.*?)\s{1,}([^\s].*?)\s+(одобрен|на рассмотрении|отклонен|черновик)",
+            info,
+            flags=re.I
+        )
+        if title_artist_match:
+            if not title:
+                title = title_artist_match.group(1).strip()
+            if not artist:
+                artist = title_artist_match.group(2).strip()
 
     date_match = re.search(r"релиз:\s*([0-9]{2}-[0-9]{2}-[0-9]{4})", info, flags=re.I)
     if date_match:
@@ -402,15 +420,24 @@ async def upload_to_musicalligator(release_meta: dict, zip_path: str):
             # Оригинальная дата релиза
             date_value = release_meta.get("release_date", "")
             if date_value:
-                await enable_toggle_by_text(page, "Оригинальная дата релиза")
-                date_ok = await fill_input_by_label(page, "Оригинальная дата релиза", date_value)
+                # В UI дата обычно с точками.
+                normalized_date = date_value.replace("-", ".")
+                toggle_ok = await enable_toggle_by_text(page, "Оригинальная дата релиза")
+                if not toggle_ok:
+                    logger.warning("Не удалось включить тумблер 'Оригинальная дата релиза'")
+
+                date_ok = await fill_input_by_label(page, "Оригинальная дата релиза", normalized_date)
                 if not date_ok:
-                    # Fallback по текущему открытому календарному input.
-                    date_input = page.locator('input.-filled, input[value*="."]').first
+                    # Fallback: календарные поля в блоках даты.
+                    date_input = page.locator(
+                        '.-full-calendar input[type="text"]:not([disabled]), '
+                        '.v-popper input[type="text"]:not([disabled])'
+                    ).last
                     if await date_input.count() > 0:
                         await date_input.click()
-                        await date_input.press("Meta+A")
-                        await date_input.type(date_value, delay=30)
+                        await page.keyboard.press("Meta+A")
+                        await page.keyboard.type(normalized_date, delay=30)
+                        await page.keyboard.press("Enter")
 
             # Свой EAN/UPC
             upc = release_meta.get("upc", "")
@@ -789,7 +816,14 @@ async def handle_request(message: types.Message):
     file_size = os.path.getsize(file_path)
     file_size_mb = file_size / (1024 * 1024)
 
-    release_meta = parse_release_info(result["info"])
+    release_meta = parse_release_info(
+        result["info"],
+        fallback_artist=artist.strip(),
+        fallback_release=release.strip()
+    )
+    # Название в Aligator всегда берем из входного сообщения,
+    # чтобы исключить искажения при парсинге текста карточки OR.
+    release_meta["title"] = release.strip()
     upload_result = await upload_to_musicalligator(release_meta, file_path)
     if upload_result["status"] == "error":
         await status_msg.edit_text(
