@@ -115,29 +115,58 @@ async def scrape_ordistribution(target_artist: str, target_release: str):
                 await search_input.press("Enter")
                 await asyncio.sleep(3)
 
-                # Ищем все строки в теле таблицы
-                rows = await page.locator("table#DataTables_Table_0 tbody tr, table tbody tr, tr").all()
-                
-                valid_rows = []
-                for row in rows:
-                    txt = await row.inner_text()
-                    if "No matching records" in txt or "Записи отсутствуют" in txt:
-                        continue
-                    valid_rows.append(row)
-
-                logger.info(f"Строк для проверки: {len(valid_rows)}")
-                
                 clean_verify = verify_string.strip().lower()
 
-                for row in valid_rows:
-                    row_text = await row.inner_text()
-                    clean_row = " ".join(row_text.split()).lower()
-                    
-                    logger.info(f"Проверка: {clean_row}")
-                    
-                    if clean_verify in clean_row:
-                        logger.info("Найдено совпадение!")
-                        return row
+                # В OR результаты выводятся карточками, а не строками таблицы.
+                text_matches = await page.get_by_text(search_query, exact=False).all()
+                logger.info(f"Текстовых совпадений по запросу: {len(text_matches)}")
+
+                for match in text_matches:
+                    ancestors = await match.locator(
+                        "xpath=ancestor::*[self::div or self::article or self::section or self::li]"
+                    ).all()
+
+                    for card in reversed(ancestors[-6:]):
+                        if not await card.is_visible():
+                            continue
+
+                        card_text = await card.inner_text()
+                        clean_card = " ".join(card_text.split()).lower()
+
+                        if (
+                            clean_verify in clean_card
+                            and len(clean_card) < 2000
+                            and "панель администратора" not in clean_card
+                            and "всего:" not in clean_card
+                        ):
+                            logger.info(f"Найдена карточка: {clean_card[:250]}")
+                            return card
+
+                # Запасной проход по видимым контейнерам на странице.
+                cards = await page.locator("article, section, li, div").all()
+                valid_cards = []
+
+                for card in cards:
+                    if not await card.is_visible():
+                        continue
+
+                    card_text = await card.inner_text()
+                    clean_card = " ".join(card_text.split()).lower()
+
+                    if (
+                        search_query.strip().lower() in clean_card
+                        and clean_verify in clean_card
+                        and 20 < len(clean_card) < 2000
+                        and "панель администратора" not in clean_card
+                        and "всего:" not in clean_card
+                    ):
+                        valid_cards.append((card, clean_card))
+
+                logger.info(f"Карточек для проверки: {len(valid_cards)}")
+
+                for card, clean_card in valid_cards:
+                    logger.info(f"Проверка карточки: {clean_card[:250]}")
+                    return card
                 
                 return None
 
@@ -166,6 +195,13 @@ async def scrape_ordistribution(target_artist: str, target_release: str):
                 if await page_button.count() > 0 and await page_button.is_visible():
                     logger.info("Открываем карточку релиза через запасной селектор")
                     await page_button.click()
+                    await asyncio.sleep(2)
+                    return True
+
+                # В некоторых карточках детали открываются кликом по самой карточке.
+                if await result_row.is_visible():
+                    logger.info("Пробуем открыть карточку кликом по найденному блоку")
+                    await result_row.click()
                     await asyncio.sleep(2)
                     return True
 
