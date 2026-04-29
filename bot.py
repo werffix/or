@@ -749,28 +749,72 @@ async def scrape_ordistribution(target_artist: str, target_release: str):
                 return False
 
             async def download_zip_from_details():
-                zip_candidates = [
-                    page.get_by_role("button", name="Скачать ZIP"),
-                    page.get_by_role("link", name="Скачать ZIP"),
-                    page.get_by_text("Скачать ZIP", exact=False),
-                    page.locator('button:has-text("Скачать ZIP"), a:has-text("Скачать ZIP")'),
-                    page.locator('button:has-text("ZIP"), a:has-text("ZIP"), a[href*="zip"], a[href*="download"]'),
-                ]
+                async def visible_zip_buttons():
+                    candidates = [
+                        page.get_by_role("button", name=re.compile(r"(Скачать|Загрузить).*ZIP", re.I)),
+                        page.get_by_role("link", name=re.compile(r"(Скачать|Загрузить).*ZIP", re.I)),
+                        page.locator('button:has-text("Скачать ZIP"), a:has-text("Скачать ZIP")'),
+                        page.locator('button:has-text("ZIP"), a:has-text("ZIP"), a[href*="zip" i], a[href*="download" i]'),
+                    ]
 
-                for candidate in zip_candidates:
-                    if await candidate.count() == 0:
+                    buttons = []
+                    for candidate in candidates:
+                        count = await candidate.count()
+                        for index in range(count):
+                            button = candidate.nth(index)
+                            try:
+                                if await button.is_visible():
+                                    buttons.append(button)
+                            except Exception:
+                                pass
+                    return buttons
+
+                async def click_and_catch_download(button, timeout=15000):
+                    try:
+                        async with page.expect_download(timeout=timeout) as download_info:
+                            await button.click(timeout=5000)
+                        return await download_info.value
+                    except PlaywrightTimeoutError:
+                        return None
+
+                deadline = asyncio.get_running_loop().time() + 600
+                archive_started = False
+
+                while asyncio.get_running_loop().time() < deadline:
+                    body_text = " ".join((await page.locator("body").inner_text()).split())
+                    progress_match = re.search(r"Подготовка архива[^0-9]*(\d+)%", body_text, flags=re.I)
+                    if progress_match:
+                        archive_started = True
+                        logger.info("Подготовка архива: %s%%", progress_match.group(1))
+                        await asyncio.sleep(10)
                         continue
 
-                    button = candidate.first
-                    if not await button.is_visible():
-                        continue
+                    buttons = await visible_zip_buttons()
+                    for button in buttons:
+                        try:
+                            button_text = " ".join((await button.inner_text()).split())
+                        except Exception:
+                            button_text = ""
 
-                    logger.info("Найдена кнопка скачивания ZIP")
-                    async with page.expect_download(timeout=60000) as download_info:
-                        await button.click()
-                    return await download_info.value
+                        if re.search(r"Подготовка|архив.*\d+%", button_text, flags=re.I):
+                            archive_started = True
+                            continue
 
-                raise RuntimeError("Кнопка 'Скачать ZIP' не найдена после открытия карточки")
+                        logger.info("Найдена кнопка скачивания ZIP")
+                        download = await click_and_catch_download(button)
+                        if download:
+                            return download
+
+                        archive_started = True
+                        logger.info("ZIP еще не скачивается, ожидаем подготовку архива")
+                        break
+
+                    if not buttons and not archive_started:
+                        await asyncio.sleep(2)
+                    else:
+                        await asyncio.sleep(10)
+
+                raise RuntimeError("ZIP не подготовился/не скачался за 10 минут")
 
             # Пробуем найти
             result_row = await find_row(target_release, target_artist)
