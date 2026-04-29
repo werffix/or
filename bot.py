@@ -179,6 +179,36 @@ async def fill_input_by_label(page, label_text: str, value: str):
     return True
 
 
+async def fill_input_by_prompt(page, prompt_text: str, value: str, press_enter: bool = False):
+    if not value:
+        return False
+
+    selectors = [
+        f'div.ui-input:has(span:has-text("{prompt_text}")) input',
+        f'div.gs-search:has(span:has-text("{prompt_text}")) input',
+        f'input[placeholder*="{prompt_text}" i]',
+    ]
+
+    target = None
+    for selector in selectors:
+        locator = page.locator(selector).first
+        if await locator.count() > 0:
+            target = locator
+            break
+
+    if target is None:
+        return False
+
+    await target.click()
+    await target.press("Meta+A")
+    await target.press("Backspace")
+    await target.fill(value)
+    await asyncio.sleep(0.2)
+    if press_enter:
+        await target.press("Enter")
+    return True
+
+
 async def enable_toggle_by_text(page, toggle_text: str):
     # В MusicAlligator сам input чекбокса часто скрыт, кликабельный элемент - switch/slider рядом с подписью.
     root = page.locator(
@@ -239,8 +269,24 @@ async def set_artist_with_create_fallback(page, label_text: str, artist_name: st
     if not artist_name:
         return
 
-    ok = await fill_input_by_label(page, label_text, artist_name)
+    prompt_map = {
+        "Исполнитель": "Введите основного исполнителя",
+        "Дополнительный исполнитель": "Введите доп. исполнителя",
+        "При участии (feat.)": "Введите feat. исполнителя",
+    }
+    prompt = prompt_map.get(label_text, "")
+
+    ok = False
+    if prompt:
+        ok = await fill_input_by_prompt(page, prompt, artist_name, press_enter=True)
     if not ok:
+        ok = await fill_input_by_label(page, label_text, artist_name)
+        if ok:
+            artist_input = page.locator('input:focus').first
+            if await artist_input.count() > 0:
+                await artist_input.press("Enter")
+    if not ok:
+        logger.warning("Не удалось заполнить поле артиста: %s", label_text)
         return
 
     await asyncio.sleep(1)
@@ -299,11 +345,20 @@ async def upload_to_musicalligator(release_meta: dict, zip_path: str):
                 await set_artist_with_create_fallback(page, "Дополнительный исполнитель", extra_artists[0])
 
             current_step = "fill_release_fields"
-            await fill_input_by_label(page, "Название релиза", release_meta.get("title", ""))
-            await fill_input_by_label(page, "Версия релиза", release_meta.get("version", ""))
+            title_ok = await fill_input_by_prompt(page, "Введите название релиза", release_meta.get("title", ""))
+            if not title_ok:
+                await fill_input_by_label(page, "Название релиза", release_meta.get("title", ""))
+
+            version_ok = await fill_input_by_prompt(page, "Введите версию релиза", release_meta.get("version", ""))
+            if not version_ok:
+                await fill_input_by_label(page, "Версия релиза", release_meta.get("version", ""))
 
             # Лейбл = первый артист; если не найден, создаем лейбл.
-            await fill_input_by_label(page, "Лейбл", main_artist)
+            label_ok = await fill_input_by_prompt(page, "Введите лейбл", main_artist, press_enter=True)
+            if not label_ok:
+                label_ok = await fill_input_by_label(page, "Лейбл", main_artist)
+            if not label_ok:
+                logger.warning("Не удалось заполнить поле лейбла")
             await asyncio.sleep(1)
             create_label_btn = page.locator('button:has-text("Проверить и создать лейбл"), div:has-text("Проверить и создать лейбл")').first
             if await create_label_btn.count() > 0 and await create_label_btn.is_visible():
@@ -313,13 +368,22 @@ async def upload_to_musicalligator(release_meta: dict, zip_path: str):
             date_value = release_meta.get("release_date", "")
             if date_value:
                 await enable_toggle_by_text(page, "Оригинальная дата релиза")
-                await fill_input_by_label(page, "Оригинальная дата релиза", date_value)
+                date_ok = await fill_input_by_label(page, "Оригинальная дата релиза", date_value)
+                if not date_ok:
+                    # Fallback по текущему открытому календарному input.
+                    date_input = page.locator('input.-filled, input[value*="."]').first
+                    if await date_input.count() > 0:
+                        await date_input.click()
+                        await date_input.press("Meta+A")
+                        await date_input.type(date_value, delay=30)
 
             # Свой EAN/UPC
             upc = release_meta.get("upc", "")
             if upc:
                 await enable_toggle_by_text(page, "У меня есть свой EAN/UPC")
-                await fill_input_by_label(page, "EAN/UPC", upc)
+                upc_ok = await fill_input_by_prompt(page, "EAN/UPC", upc)
+                if not upc_ok:
+                    await fill_input_by_label(page, "EAN/UPC", upc)
 
             current_step = "return_releases"
             await page.goto("https://app.musicalligator.ru/releases", timeout=90000, wait_until="domcontentloaded")
