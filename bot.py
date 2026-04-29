@@ -58,24 +58,62 @@ async def scrape_ordistribution(target_artist: str, target_release: str):
             await page.goto("https://ordistribution.com/admin/dashboard", timeout=60000)
             await asyncio.sleep(8) # Даем время скриптам DataTables инициализироваться
 
+            async def set_search_value(search_input, value: str):
+                await search_input.click()
+                await search_input.press("Meta+A")
+                await search_input.press("Backspace")
+                await search_input.fill("")
+
+                # Для React-controlled input простого fill не всегда достаточно:
+                # вызываем native setter и вручную диспатчим события ввода.
+                await search_input.evaluate(
+                    """(el, newValue) => {
+                        const prototype = Object.getPrototypeOf(el);
+                        const valueSetter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
+
+                        if (valueSetter) {
+                            valueSetter.call(el, newValue);
+                        } else {
+                            el.value = newValue;
+                        }
+
+                        el.dispatchEvent(new Event('input', { bubbles: true }));
+                        el.dispatchEvent(new Event('change', { bubbles: true }));
+                    }""",
+                    value,
+                )
+
             async def find_row(search_query: str, verify_string: str):
                 logger.info(f"--- Поиск: {search_query} ---")
-                
-                # Селектор инпута из твоего HTML (DataTables обычно создает input в блоке filter)
-                search_selector = 'input[type="search"], .dataTables_filter input'
-                search_input = page.locator(search_selector).first
-                
-                if await search_input.count() == 0:
+
+                search_selectors = [
+                    'input[type="search"]',
+                    'input[placeholder*="поиск" i]',
+                    'input[placeholder*="search" i]',
+                    'input[aria-label*="поиск" i]',
+                    'input[aria-label*="search" i]',
+                    'input[class*="search" i]',
+                    'input',
+                ]
+
+                search_input = None
+                for selector in search_selectors:
+                    candidate = page.locator(selector).first
+                    if await candidate.count() > 0 and await candidate.is_visible():
+                        search_input = candidate
+                        logger.info(f"Используем инпут поиска: {selector}")
+                        break
+
+                if search_input is None:
                     logger.error("Инпут поиска не найден!")
                     return None
 
-                # Фокусируемся и вводим текст через JS (самый надежный метод)
-                await search_input.evaluate("el => el.value = ''") # Очистка
-                await search_input.focus()
-                await page.keyboard.type(search_query, delay=100)
-                await page.keyboard.press("Enter")
-                
-                await asyncio.sleep(5) # Ждем, пока таблица перерисуется
+                await set_search_value(search_input, search_query)
+                await asyncio.sleep(2)
+
+                # На случай логики, которая запускает фильтр только после подтверждения.
+                await search_input.press("Enter")
+                await asyncio.sleep(3)
 
                 # Ищем все строки в теле таблицы
                 rows = page.locator("table#DataTables_Table_0 tbody tr, table tbody tr, tr").all()
