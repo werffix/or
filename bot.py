@@ -96,13 +96,64 @@ def parse_release_info(row_info: str, fallback_artist: str = "", fallback_releas
     upc = ""
     version = ""
 
+    def field_value(label_patterns):
+        for i, line in enumerate(raw_lines):
+            for pattern in label_patterns:
+                same_line = re.search(
+                    rf"{pattern}\s*:?\s*(.+)$",
+                    line,
+                    flags=re.I
+                )
+                if same_line:
+                    value = same_line.group(1).strip()
+                    if value:
+                        return value
+
+                if re.fullmatch(rf"{pattern}\s*:?", line, flags=re.I):
+                    for next_line in raw_lines[i + 1:i + 4]:
+                        if next_line and not re.fullmatch(
+                            r"(Название релиза|Артисты|Исполнитель|Подзаголовок|Версия|Дата релиза|UPC|EAN|Статус|Платформа)\s*:?",
+                            next_line,
+                            flags=re.I
+                        ):
+                            return next_line.strip()
+
+        for pattern in label_patterns:
+            flat_match = re.search(
+                rf"{pattern}\s*:?\s*(.+?)(?=\s+(Название релиза|Артисты|Исполнитель|Подзаголовок|Версия|Дата релиза|UPC|EAN|Статус|Платформа)\s*:|\s*$)",
+                info,
+                flags=re.I
+            )
+            if flat_match:
+                return flat_match.group(1).strip()
+
+        return ""
+
+    # Предпочитаем явные поля из OR, если они есть в карточке/деталях.
+    explicit_title = field_value([r"Название релиза", r"Релиз"])
+    explicit_artists = field_value([r"Артисты", r"Исполнитель"])
+    explicit_version = field_value([r"Подзаголовок", r"Версия релиза", r"Версия"])
+    explicit_date = field_value([r"Дата релиза"])
+    explicit_upc = field_value([r"UPC/EAN", r"EAN/UPC", r"UPC", r"EAN"])
+
+    if explicit_title:
+        title = explicit_title
+    if explicit_artists:
+        artist = explicit_artists
+    if explicit_version:
+        version = explicit_version
+    if explicit_date:
+        release_date = explicit_date
+    if explicit_upc:
+        upc = re.sub(r"\D", "", explicit_upc)
+
     # Сначала пробуем взять название/артиста из первых строк карточки OR.
-    if len(raw_lines) >= 2:
+    if (not explicit_title or not explicit_artists) and len(raw_lines) >= 2:
         first = raw_lines[0]
         second = raw_lines[1]
-        if first and not any(x in first.lower() for x in ["одобрен", "релиз:", "платформа:", "upc", "ean"]):
+        if not explicit_title and first and not any(x in first.lower() for x in ["одобрен", "релиз:", "платформа:", "upc", "ean"]):
             title = first
-        if second and not any(x in second.lower() for x in ["одобрен", "релиз:", "платформа:", "upc", "ean"]):
+        if not explicit_artists and second and not any(x in second.lower() for x in ["одобрен", "релиз:", "платформа:", "upc", "ean"]):
             artist = second
 
     # fallback на старый regex по плоскому тексту
@@ -118,16 +169,16 @@ def parse_release_info(row_info: str, fallback_artist: str = "", fallback_releas
             if not artist:
                 artist = title_artist_match.group(2).strip()
 
-    date_match = re.search(r"релиз:\s*([0-9]{2}-[0-9]{2}-[0-9]{4})", info, flags=re.I)
-    if date_match:
+    date_match = re.search(r"релиз:\s*([0-9]{2}[-.][0-9]{2}[-.][0-9]{4})", info, flags=re.I)
+    if not release_date and date_match:
         release_date = date_match.group(1)
 
     upc_match = re.search(r"(upc|ean)\s*:\s*([0-9]{8,20})", info, flags=re.I)
-    if upc_match:
+    if not upc and upc_match:
         upc = upc_match.group(2)
 
     version_match = re.search(r"\(([^)]+)\)", title)
-    if version_match:
+    if not version and version_match:
         version = version_match.group(1).strip()
 
     return {
@@ -197,7 +248,7 @@ async def fill_input_by_label(page, label_text: str, value: str):
     return True
 
 
-async def fill_input_by_prompt(page, prompt_text: str, value: str, press_enter: bool = False):
+async def fill_input_by_prompt(page, prompt_text: str, value: str, press_enter: bool = False, occurrence: int = 0):
     if not value:
         return False
 
@@ -209,8 +260,12 @@ async def fill_input_by_prompt(page, prompt_text: str, value: str, press_enter: 
 
     target = None
     for selector in selectors:
-        locator = page.locator(selector).first
-        if await locator.count() > 0:
+        locators = page.locator(selector)
+        count = await locators.count()
+        if count > 0:
+            index = occurrence if occurrence >= 0 else count + occurrence
+            index = max(0, min(index, count - 1))
+            locator = locators.nth(index)
             target = locator
             break
 
@@ -228,19 +283,22 @@ async def fill_input_by_prompt(page, prompt_text: str, value: str, press_enter: 
     return True
 
 
-async def fill_select_input_by_field_label(page, field_label: str, value: str, press_enter: bool = True):
+async def fill_select_input_by_field_label(page, field_label: str, value: str, press_enter: bool = True, occurrence: int = 0):
     if not value:
         return False
 
     roots = [
-        page.locator(f'.ui-artists-select:has(label p:has-text("{field_label}"))').first,
-        page.locator(f'.ui-labels-select:has(label p:has-text("{field_label}"))').first,
+        page.locator(f'.ui-artists-select:has(label p:has-text("{field_label}"))'),
+        page.locator(f'.ui-labels-select:has(label p:has-text("{field_label}"))'),
     ]
 
     root = None
     for candidate in roots:
-        if await candidate.count() > 0:
-            root = candidate
+        count = await candidate.count()
+        if count > 0:
+            index = occurrence if occurrence >= 0 else count + occurrence
+            index = max(0, min(index, count - 1))
+            root = candidate.nth(index)
             break
 
     if root is None:
@@ -316,7 +374,42 @@ async def enable_toggle_by_text(page, toggle_text: str):
     return await checkbox.is_checked()
 
 
-async def set_artist_with_create_fallback(page, label_text: str, artist_name: str):
+def normalize_musicalligator_date(date_value: str) -> str:
+    value = date_value.strip()
+    yyyy_mm_dd = re.fullmatch(r"([0-9]{4})[-.]([0-9]{2})[-.]([0-9]{2})", value)
+    if yyyy_mm_dd:
+        return f"{yyyy_mm_dd.group(3)}.{yyyy_mm_dd.group(2)}.{yyyy_mm_dd.group(1)}"
+
+    dd_mm_yyyy = re.fullmatch(r"([0-9]{2})[-.]([0-9]{2})[-.]([0-9]{4})", value)
+    if dd_mm_yyyy:
+        return f"{dd_mm_yyyy.group(1)}.{dd_mm_yyyy.group(2)}.{dd_mm_yyyy.group(3)}"
+
+    return value.replace("-", ".")
+
+
+async def click_additional_artist_plus(page):
+    section = page.locator('.ui-artists-select:has(label p:has-text("Дополнительный исполнитель"))').last
+    candidates = [
+        section.locator('button:has(svg), button:has-text("+"), .plus, [class*="plus"]').last,
+        page.locator('button:has-text("+"), button[aria-label*="Добав" i], button[title*="Добав" i]').last,
+    ]
+
+    for candidate in candidates:
+        if await candidate.count() == 0:
+            continue
+        try:
+            if await candidate.is_visible():
+                await candidate.click(timeout=3000)
+                await asyncio.sleep(0.5)
+                return True
+        except Exception:
+            pass
+
+    logger.warning("Не удалось нажать плюс дополнительного исполнителя")
+    return False
+
+
+async def set_artist_with_create_fallback(page, label_text: str, artist_name: str, occurrence: int = 0):
     if not artist_name:
         return
 
@@ -327,9 +420,9 @@ async def set_artist_with_create_fallback(page, label_text: str, artist_name: st
     }
     prompt = prompt_map.get(label_text, "")
 
-    ok = await fill_select_input_by_field_label(page, label_text, artist_name, press_enter=True)
+    ok = await fill_select_input_by_field_label(page, label_text, artist_name, press_enter=True, occurrence=occurrence)
     if not ok and prompt:
-        ok = await fill_input_by_prompt(page, prompt, artist_name, press_enter=True)
+        ok = await fill_input_by_prompt(page, prompt, artist_name, press_enter=True, occurrence=occurrence)
     if not ok:
         ok = await fill_input_by_label(page, label_text, artist_name)
         if ok:
@@ -392,8 +485,15 @@ async def upload_to_musicalligator(release_meta: dict, zip_path: str):
 
             current_step = "fill_artist"
             await set_artist_with_create_fallback(page, "Исполнитель", main_artist)
-            if extra_artists:
-                await set_artist_with_create_fallback(page, "Дополнительный исполнитель", extra_artists[0])
+            for index, extra_artist in enumerate(extra_artists):
+                if index > 0:
+                    await click_additional_artist_plus(page)
+                await set_artist_with_create_fallback(
+                    page,
+                    "Дополнительный исполнитель",
+                    extra_artist,
+                    occurrence=-1
+                )
 
             current_step = "fill_release_fields"
             title_ok = await fill_input_by_prompt(page, "Введите название релиза", release_meta.get("title", ""))
@@ -421,7 +521,7 @@ async def upload_to_musicalligator(release_meta: dict, zip_path: str):
             date_value = release_meta.get("release_date", "")
             if date_value:
                 # В UI дата обычно с точками.
-                normalized_date = date_value.replace("-", ".")
+                normalized_date = normalize_musicalligator_date(date_value)
                 toggle_ok = await enable_toggle_by_text(page, "Оригинальная дата релиза")
                 if not toggle_ok:
                     logger.warning("Не удалось включить тумблер 'Оригинальная дата релиза'")
@@ -448,6 +548,7 @@ async def upload_to_musicalligator(release_meta: dict, zip_path: str):
                     await fill_input_by_label(page, "EAN/UPC", upc)
 
             current_step = "return_releases"
+            await page.reload(timeout=90000, wait_until="domcontentloaded")
             await page.goto("https://app.musicalligator.ru/releases", timeout=90000, wait_until="domcontentloaded")
             await page.wait_for_selector('button:has-text("Новый релиз")', timeout=90000)
 
@@ -687,6 +788,38 @@ async def scrape_ordistribution(target_artist: str, target_release: str):
             if not details_opened:
                 raise RuntimeError("Кнопка 'Подробнее' не найдена у найденного релиза")
 
+            details_info = await page.locator("body").inner_text()
+            form_info = await page.locator("body").evaluate(
+                """(body) => {
+                    const controls = Array.from(body.querySelectorAll('input, textarea, select'));
+                    const lines = [];
+
+                    for (const control of controls) {
+                        const value = control.value || control.getAttribute('value') || '';
+                        if (!value.trim()) continue;
+
+                        const id = control.id;
+                        const explicitLabel = id ? body.querySelector(`label[for="${CSS.escape(id)}"]`) : null;
+                        const wrappingLabel = control.closest('label');
+                        const containerLabel = control.closest('div, section, article')?.querySelector('label, p, span');
+                        const label = (
+                            explicitLabel?.innerText ||
+                            wrappingLabel?.innerText ||
+                            control.getAttribute('aria-label') ||
+                            control.getAttribute('placeholder') ||
+                            control.getAttribute('name') ||
+                            containerLabel?.innerText ||
+                            ''
+                        ).trim();
+
+                        if (label) {
+                            lines.push(`${label}: ${value.trim()}`);
+                        }
+                    }
+
+                    return lines.join('\\n');
+                }"""
+            )
             download = await download_zip_from_details()
             file_path = os.path.join(downloads_path, download.suggested_filename)
             await download.save_as(file_path)
@@ -694,7 +827,7 @@ async def scrape_ordistribution(target_artist: str, target_release: str):
             await browser.close()
             return {
                 "status": "success", 
-                "info": row_info.replace("\n", " ").strip(), 
+                "info": f"{row_info}\n{details_info}\n{form_info}".strip(), 
                 "file_path": file_path
             }
 
@@ -821,9 +954,6 @@ async def handle_request(message: types.Message):
         fallback_artist=artist.strip(),
         fallback_release=release.strip()
     )
-    # Название в Aligator всегда берем из входного сообщения,
-    # чтобы исключить искажения при парсинге текста карточки OR.
-    release_meta["title"] = release.strip()
     upload_result = await upload_to_musicalligator(release_meta, file_path)
     if upload_result["status"] == "error":
         await status_msg.edit_text(
