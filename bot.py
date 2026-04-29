@@ -13,12 +13,16 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 LOGIN = os.getenv("SITE_LOGIN")
 PASSWORD = os.getenv("SITE_PASSWORD")
 
-# Настройка подробного логирования
+# Настройка путей и логирования
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+log_path = os.path.join(BASE_DIR, "bot_debug.log")
+downloads_path = os.path.join(BASE_DIR, "downloads")
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("bot_debug.log", encoding='utf-8'),
+        logging.FileHandler(log_path, encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
@@ -27,134 +31,122 @@ logger = logging.getLogger(__name__)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Убедимся, что папка для загрузок существует
-os.makedirs("downloads", exist_ok=True)
+# Создаем папку для загрузок, если её нет
+os.makedirs(downloads_path, exist_ok=True)
 
 async def scrape_ordistribution(artist: str, release: str):
-    """
-    Функция для логина на сайт, поиска и скачивания релиза.
-    ВНИМАНИЕ: CSS-селекторы (вида 'input[name="email"]') нужно будет 
-    заменить на реальные, изучив код страницы сайта.
-    """
     logger.info(f"Запуск парсера для: {artist} - {release}")
     
     async with async_playwright() as p:
-        # Запускаем браузер в headless режиме (без графического интерфейса)
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(accept_downloads=True)
         page = await context.new_page()
 
         try:
-            # 1. Логин
+            # 1. Авторизация
             logger.info("Переход на страницу логина...")
-            await page.goto("https://ordistribution.com/login", timeout=30000)
+            await page.goto("https://ordistribution.com/login", timeout=45000)
             
             logger.info("Ввод учетных данных...")
-            # ЗАМЕНИТЬ СЕЛЕКТОРЫ НА АКТУАЛЬНЫЕ
             await page.fill('input[type="email"]', LOGIN) 
             await page.fill('input[type="password"]', PASSWORD)
             await page.click('button[type="submit"]')
             
-            # Ждем, пока загрузится дашборд после логина
             await page.wait_for_load_state("networkidle")
-            logger.info("Авторизация успешна.")
-
-            # 2. Поиск
+            
+            # 2. Переход в админку
+            logger.info("Переход в админ-панель...")
+            await page.goto("https://ordistribution.com/admin/dashboard", timeout=45000)
+            await page.wait_for_load_state("networkidle")
+            
+            # 3. Поиск
             search_query = f"{artist} {release}"
             logger.info(f"Выполняем поиск: {search_query}")
             
-            # ЗАМЕНИТЬ СЕЛЕКТОРЫ НА АКТУАЛЬНЫЕ
-            await page.fill('input[name="search"]', search_query)
-            await page.press('input[name="search"]', 'Enter')
+            # Ищем поле поиска (универсальный селектор для админки)
+            search_input = page.locator('input[type="search"], input[placeholder*="Search" i], input[type="text"]').first
+            await search_input.wait_for(state="visible", timeout=15000)
+            await search_input.fill(search_query)
+            await search_input.press('Enter')
+            
             await page.wait_for_load_state("networkidle")
+            
+            # 4. Клик по релизу
+            # Ищем ссылку, текст которой содержит название релиза
+            try:
+                release_element = page.get_by_text(release, exact=False).first
+                await release_element.click()
+                await page.wait_for_load_state("networkidle")
+                logger.info("Страница релиза открыта.")
+            except Exception as e:
+                logger.warning(f"Не удалось кликнуть по релизу: {e}")
 
-            # Кликаем на первый результат (пример)
-            await page.click('.search-result-item:first-child')
-            await page.wait_for_load_state("networkidle")
-
-            # 3. Сбор данных
-            logger.info("Сбор текстовых данных о релизе...")
-            # Пример парсинга: заменить селектор
-            release_info = await page.inner_text('.release-details-container') 
-
-            # 4. Скачивание ZIP
-            logger.info("Ожидание начала загрузки файла...")
-            # ЗАМЕНИТЬ СЕЛЕКТОР КНОПКИ СКАЧИВАНИЯ
+            # 5. Сбор данных и скачивание ZIP
+            logger.info("Поиск кнопки скачивания ZIP...")
+            
             async with page.expect_download() as download_info:
-                await page.click('text="Download ZIP"') # Ищет кнопку с текстом Download ZIP
+                # Пробуем найти кнопку ZIP или Download
+                zip_button = page.locator('a:has-text("ZIP"), button:has-text("ZIP"), a:has-text("Download")').first
+                await zip_button.click()
             
             download = await download_info.value
-            file_path = os.path.join("downloads", download.suggested_filename)
+            file_path = os.path.join(downloads_path, download.suggested_filename)
             await download.save_as(file_path)
-            logger.info(f"Файл успешно сохранен: {file_path}")
-
+            
+            # Собираем текстовую информацию со страницы (основной контент)
+            release_info = await page.locator('body').inner_text()
+            
             await browser.close()
-            return {"status": "success", "info": release_info, "file_path": file_path}
+            return {
+                "status": "success", 
+                "info": release_info[:500], # Берем первые 500 символов для превью
+                "file_path": file_path
+            }
 
         except PlaywrightTimeoutError as e:
-            logger.error(f"Таймаут Playwright: элемент не найден или страница не загрузилась. Детали: {e}")
+            logger.error(f"Ошибка таймаута: {e}")
             await browser.close()
-            return {"status": "error", "message": "Ошибка таймаута на сайте (элемент не найден). Проверь логи."}
+            return {"status": "error", "message": "Сайт долго отвечал или элемент не найден."}
         except Exception as e:
-            logger.error(f"Непредвиденная ошибка в парсере: {e}", exc_info=True)
+            logger.error(f"Ошибка парсера: {e}", exc_info=True)
             await browser.close()
             return {"status": "error", "message": str(e)}
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    logger.info(f"Пользователь {message.from_user.id} нажал /start")
     await message.answer(
-        "Привет! Отправь мне запрос в формате:\n"
-        "**Артист - Название релиза**\n\n"
-        "Я найду его на ordistribution, соберу данные и скачаю ZIP."
+        "👋 Бот готов к работе!\n\n"
+        "Введи запрос в формате:\n"
+        "`Артист - Название релиза`"
     )
 
 @dp.message(F.text)
 async def handle_request(message: types.Message):
-    text = message.text.strip()
-    
-    # Проверка формата
-    if " - " not in text:
-        logger.warning(f"Неверный формат сообщения от {message.from_user.id}: {text}")
-        await message.answer("Пожалуйста, используй формат: Артист - Название релиза")
+    if " - " not in message.text:
+        await message.answer("⚠️ Неверный формат. Используй: `Артист - Название релиза`")
         return
 
-    artist, release = text.split(" - ", 1)
-    artist = artist.strip()
-    release = release.strip()
+    artist, release = message.text.split(" - ", 1)
+    status_msg = await message.answer("🔍 Захожу в админку и ищу релиз...")
 
-    logger.info(f"Получен запрос. Артист: '{artist}', Релиз: '{release}'")
-    status_msg = await message.answer("⏳ Подключаюсь к серверу и ищу релиз... Это может занять около минуты.")
-
-    # Запускаем парсер
-    result = await scrape_ordistribution(artist, release)
+    result = await scrape_ordistribution(artist.strip(), release.strip())
 
     if result["status"] == "error":
-        await status_msg.edit_text(f"❌ Произошла ошибка при поиске/скачивании:\n`{result['message']}`")
+        await status_msg.edit_text(f"❌ Ошибка:\n{result['message']}")
         return
 
-    # Если все успешно
-    info_text = result["info"]
-    file_path = result["file_path"]
-
-    await status_msg.edit_text(f"✅ Релиз найден!\n\n**Данные:**\n{info_text[:900]}...") # Обрезаем текст, чтобы влез в лимит TG
+    await status_msg.edit_text(f"✅ Данные собраны!\n\n{result['info']}...")
     
-    # Отправляем архив
     try:
-        logger.info(f"Отправка файла в Telegram: {file_path}")
-        document = FSInputFile(file_path)
-        await message.answer_document(document)
-        
-        # Удаляем файл с сервера после отправки, чтобы не забивать место (опционально)
-        os.remove(file_path)
-        logger.info(f"Файл {file_path} удален с сервера.")
+        doc = FSInputFile(result["file_path"])
+        await message.answer_document(doc)
+        os.remove(result["file_path"]) # Удаляем файл после отправки
     except Exception as e:
-        logger.error(f"Ошибка при отправке файла в Telegram: {e}", exc_info=True)
-        await message.answer("Данные собраны, но произошла ошибка при отправке ZIP-файла.")
+        logger.error(f"Ошибка отправки файла: {e}")
+        await message.answer("Не удалось отправить ZIP-файл.")
 
 async def main():
     logger.info("Бот запущен!")
-    # Запускаем поллинг
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
